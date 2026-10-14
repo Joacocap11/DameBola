@@ -1,8 +1,11 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { RotateCcw, Save } from "lucide-react";
 import { Button, Card, PageHeader, Switch } from "../components/ui";
 import { useToasts } from "../components/Toasts";
 import { useAppState } from "../hooks/useAppState";
+import { useNetworkState } from "../hooks/useNetworkState";
+import { ShortcutSetting } from "../components/ShortcutSetting";
+import { describeShortcut } from "../lib/shortcut";
 import type { Settings } from "../types";
 
 const DEFAULT_DURATION = 15;
@@ -23,12 +26,26 @@ function Row({ title, hint, children }: { title: string; hint?: string; children
 
 export function SettingsPage() {
   const { settings, saveSettings } = useAppState();
+  const { devices } = useNetworkState();
   const { notify } = useToasts();
   const [draft, setDraft] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
 
+  const lastSaved = useRef<Settings | null>(null);
   useEffect(() => {
-    if (settings) setDraft(settings);
+    if (!settings) return;
+    const previous = lastSaved.current;
+    lastSaved.current = settings;
+    // Si cambió algo guardado por otra vía (p. ej. el atajo), se aplica al borrador
+    // sin perder lo que el usuario ya editó en otros campos.
+    setDraft((current) => {
+      if (!current || !previous) return settings;
+      const next: Record<string, unknown> = { ...current };
+      for (const key of Object.keys(settings) as (keyof Settings)[]) {
+        if (settings[key] !== previous[key]) next[key] = settings[key];
+      }
+      return next as unknown as Settings;
+    });
   }, [settings]);
 
   if (!draft || !settings) return <p className="text-zinc-400">Cargando configuración…</p>;
@@ -36,6 +53,18 @@ export function SettingsPage() {
   const patch = (p: Partial<Settings>) => setDraft({ ...draft, ...p });
   const dirty = JSON.stringify(draft) !== JSON.stringify(settings);
   const nameOk = draft.userName.trim().length > 0;
+  const paired = devices.filter((d) => d.pairing === "paired");
+  const missingTarget = draft.shortcutDeviceId !== null && !paired.some((d) => d.deviceId === draft.shortcutDeviceId);
+
+  const shortcutLabel = describeShortcut(settings.shortcutKey);
+
+  async function saveShortcut(shortcutKey: string): Promise<boolean> {
+    if (!settings) return false;
+    // Solo cambia el atajo: el resto de lo guardado queda intacto.
+    const ok = await saveSettings({ ...settings, shortcutKey });
+    if (ok) notify("success", `Atajo guardado: ${describeShortcut(shortcutKey)}.`);
+    return ok;
+  }
 
   async function save() {
     if (!draft) return;
@@ -58,6 +87,25 @@ export function SettingsPage() {
       />
 
       <Card>
+        <Row title="Atajo de teclado" hint={`Envía DAME BOLA con esta ventana en primer plano (${shortcutLabel}). No funciona con la app minimizada ni cerrada.`}>
+          <Switch checked={draft.shortcutEnabled} onChange={(v) => patch({ shortcutEnabled: v })} label="Activar atajo de teclado" />
+        </Row>
+
+        <Row title="Combinación" hint="Teclas F1–F24, o Ctrl/Cmd + letra o número. Se guarda al instante; por defecto F12.">
+          <ShortcutSetting current={settings.shortcutKey} onSave={saveShortcut} />
+        </Row>
+
+        <Row title={`Destinatario (${shortcutLabel})`} hint="Con un solo equipo emparejado se elige automáticamente. Si hay varios, seleccioná uno.">
+          <div className="w-56 space-y-2">
+            <select aria-label="Destinatario del atajo" value={draft.shortcutDeviceId ?? ""} onChange={(e) => patch({ shortcutDeviceId: e.target.value || null })} className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm">
+              <option value="">Único equipo emparejado</option>
+              {missingTarget && <option value={draft.shortcutDeviceId!}>Equipo ya no emparejado</option>}
+              {paired.map((d) => <option key={d.deviceId} value={d.deviceId}>{d.name}</option>)}
+            </select>
+            {(missingTarget || (draft.shortcutDeviceId === null && paired.length !== 1)) && <p className="text-xs text-amber-400">{missingTarget ? "Elegí un equipo emparejado." : paired.length === 0 ? "Primero emparejá un equipo en Dispositivos." : "Elegí un destinatario para habilitar el envío."}</p>}
+          </div>
+        </Row>
+
         <Row title="Tu nombre" hint="Se muestra en los otros equipos y aparece como remitente de tus alertas.">
           <input value={draft.userName} maxLength={40} onChange={(e) => patch({ userName: e.target.value })} aria-invalid={!nameOk} className={`w-56 rounded-xl border bg-zinc-950 px-3 py-2 text-sm outline-none focus:border-red-500 ${nameOk ? "border-zinc-700" : "border-red-600"}`} />
         </Row>

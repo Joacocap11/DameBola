@@ -1,0 +1,51 @@
+name: Windows shortcut preview installer
+
+on:
+  push:
+    branches: [feature/phase2-hotkey]
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install dependencies
+        run: npm ci
+      - name: Verify types and frontend tests
+        run: |
+          npm run typecheck
+          npm test
+      - name: Build Windows x64 NSIS installer
+        run: npm run tauri build -- --bundles nsis
+      - name: Prepare download and checksum
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path preview-download | Out-Null
+          $installers = @(Get-ChildItem 'src-tauri/target/release/bundle/nsis/*-setup.exe')
+          if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer" }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $short = (git rev-parse --short=7 HEAD).Trim()
+          $name = "DameBola-$version-shortcut-$short-Windows-x64-setup.exe"
+          $destination = "preview-download/$name"
+          Copy-Item $installers[0].FullName $destination
+          $hash = (Get-FileHash $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content 'preview-download/SHA256SUMS.txt' -Encoding ascii
+          @("Version: $version", "Source commit: $(git rev-parse HEAD)", "Installer: $name") | Set-Content 'preview-download/SOURCE.txt' -Encoding ascii
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: DameBola-shortcut-Windows-x64
+          path: preview-download/*
+          if-no-files-found: error
+          retention-days: 14

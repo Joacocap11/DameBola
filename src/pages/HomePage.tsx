@@ -7,10 +7,11 @@ import { useAppState } from "../hooks/useAppState";
 import { useNetworkState } from "../hooks/useNetworkState";
 import { countPlayable } from "../lib/songs";
 import { pluralSongs } from "../lib/format";
+import { describeShortcut } from "../lib/shortcut";
 import { api, errorMessage } from "../services/api";
 
 export function HomePage({ onGoToSongs }: { onGoToSongs: () => void }) {
-  const { songs, alertActive } = useAppState();
+  const { songs, alertActive, settings } = useAppState();
   const { devices } = useNetworkState();
   const { notify } = useToasts();
   const connected = devices.filter((d) => d.connection === "connected");
@@ -85,6 +86,7 @@ export function HomePage({ onGoToSongs }: { onGoToSongs: () => void }) {
         gigante y una canción al azar de tu biblioteca. Se cierra con el botón, con Escape o sola tras unos segundos, y
         tus aplicaciones siguen funcionando como siempre.
       </p>
+      {settings?.shortcutEnabled &&  <p className="text-sm text-zinc-300"><kbd className="rounded border border-zinc-600 px-2 py-1 font-mono">{describeShortcut(settings.shortcutKey)}</kbd> envía DAME BOLA al compañero de Configuración, con esta ventana en primer plano.</p>}
     </div>
   );
 }

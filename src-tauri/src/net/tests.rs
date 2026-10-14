@@ -349,9 +349,16 @@ async fn sending_to_a_disconnected_device_reports_offline() {
 async fn reconnects_automatically_after_the_connection_drops() {
     let (a, b) = (node("Ana").await, node("Beto").await);
     pair(&a, &b).await;
+    let before_a = a.svc.connection_ids();
+    let before_b = b.svc.connection_ids();
     a.svc.drop_all_connections();
-    wait_for("cae la conexión", || a.svc.connection_count() == 0 || b.svc.connection_count() == 0).await;
-    wait_for("se reconecta sola", || a.svc.connection_count() == 1 && b.svc.connection_count() == 1).await;
+    // Una reconexión rápida puede ocurrir entre dos sondeos de 25 ms. Exigir
+    // conexiones nuevas en ambos extremos comprueba el reemplazo sin depender
+    // de observar ese estado desconectado transitorio (carrera en Windows).
+    wait_for("se reconecta sola con conexiones nuevas", || {
+        a.svc.connection_count() == 1 && b.svc.connection_count() == 1
+            && a.svc.connection_ids() != before_a && b.svc.connection_ids() != before_b
+    }).await;
     assert_eq!(a.svc.send_alert(&b.id()).await.status, "shown");
 }
 
