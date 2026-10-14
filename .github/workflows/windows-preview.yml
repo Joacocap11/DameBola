@@ -1,4 +1,4 @@
-name: Windows F12 preview installer
+name: Windows shortcut preview installer
 
 on:
   push:
@@ -23,7 +23,7 @@ jobs:
           workspaces: src-tauri
       - name: Install dependencies
         run: npm ci
-      - name: Verify types and shortcut tests
+      - name: Verify types and frontend tests
         run: |
           npm run typecheck
           npm test
@@ -35,14 +35,17 @@ jobs:
           New-Item -ItemType Directory -Path preview-download | Out-Null
           $installers = @(Get-ChildItem 'src-tauri/target/release/bundle/nsis/*-setup.exe')
           if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer" }
-          $destination = 'preview-download/DameBola-0.1.1-F12-Windows-x64-setup.exe'
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $short = (git rev-parse --short=7 HEAD).Trim()
+          $name = "DameBola-$version-shortcut-$short-Windows-x64-setup.exe"
+          $destination = "preview-download/$name"
           Copy-Item $installers[0].FullName $destination
           $hash = (Get-FileHash $destination -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  DameBola-0.1.1-F12-Windows-x64-setup.exe" | Set-Content 'preview-download/SHA256SUMS.txt' -Encoding ascii
-          "Source commit: $(git rev-parse HEAD)" | Set-Content 'preview-download/SOURCE.txt' -Encoding ascii
+          "$hash  $name" | Set-Content 'preview-download/SHA256SUMS.txt' -Encoding ascii
+          @("Version: $version", "Source commit: $(git rev-parse HEAD)", "Installer: $name") | Set-Content 'preview-download/SOURCE.txt' -Encoding ascii
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: DameBola-F12-Windows-x64
+          name: DameBola-shortcut-Windows-x64
           path: preview-download/*
           if-no-files-found: error
           retention-days: 14

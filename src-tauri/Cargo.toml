@@ -1,6 +1,6 @@
 [package]
 name = "damebola"
-version = "0.1.1"
+version = "0.1.2"
 license = "MIT"
 repository = "https://github.com/joacocap11/DameBola"
 description = "DameBola - alertas humorísticas entre compañeros de oficina"

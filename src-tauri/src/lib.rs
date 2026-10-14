@@ -6,6 +6,7 @@ mod error;
 mod net;
 mod selection;
 mod settings;
+mod shortcut;
 mod songs;
 
 use std::sync::Arc;

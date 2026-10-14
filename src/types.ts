@@ -35,6 +35,8 @@ export interface Settings {
   animationsEnabled: boolean;
   launchAtLogin: boolean;
   shortcutEnabled: boolean;
+  /** Combinación canónica, p. ej. "F12" o "Ctrl+Shift+B". */
+  shortcutKey: string;
   /** null: use the only paired device; never choose among several. */
   shortcutDeviceId: string | null;
 }
