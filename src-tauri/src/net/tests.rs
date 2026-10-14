@@ -398,7 +398,14 @@ async fn disabling_the_network_stops_listening_and_clears_state() {
     let a = node("Ana").await;
     a.svc.save_settings(NetworkSettings { enabled: false, ..a.svc.settings() }).await.unwrap();
     assert_eq!(a.svc.status().state, "stopped");
-    assert!(tokio::net::TcpStream::connect(("127.0.0.1", a.port)).await.is_err(), "el puerto debe cerrarse");
+    let port = a.port;
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err(), "el puerto debe cerrarse");
     a.svc.save_settings(NetworkSettings { enabled: true, ..a.svc.settings() }).await.unwrap();
     assert_eq!(a.svc.status().state, "running");
     assert!(tokio::net::TcpStream::connect(("127.0.0.1", a.port)).await.is_ok());

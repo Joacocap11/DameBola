@@ -745,7 +745,7 @@ impl Inner {
             }
         }
         for ip in addresses.iter().filter(|ip| !existing.contains(ip)) {
-            match TcpListener::bind(SocketAddr::new(*ip, bound_port)).await {
+            match Self::bind_with_retry(SocketAddr::new(*ip, bound_port)).await {
                 Ok(listener) => {
                     if bound_port == 0 {
                         bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
@@ -769,6 +769,22 @@ impl Inner {
         st.addresses = st.running.as_ref().map(|r| addresses.iter().copied().filter(|ip| r.listeners.contains_key(ip)).collect()).unwrap_or_default();
         st.bound_port = Some(bound_port);
         last_error
+    }
+
+    /// Tras desactivar/reactivar la red el listener anterior puede tardar unos ms en soltar el puerto.
+    async fn bind_with_retry(addr: SocketAddr) -> std::io::Result<TcpListener> {
+        let mut last = None;
+        for _ in 0..10 {
+            match TcpListener::bind(addr).await {
+                Ok(l) => return Ok(l),
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && addr.port() != 0 => {
+                    last = Some(e);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::AddrInUse)))
     }
 
     async fn accept_loop(this: Arc<Self>, listener: TcpListener, cancel: CancellationToken) {
@@ -922,6 +938,10 @@ impl Inner {
             }
         }
         let _ = tokio::time::timeout(Duration::from_secs(1), ws.close(None)).await;
+        // Cierre ordenado: se leen los datos pendientes hasta que el otro extremo cierre.
+        // Cerrar un socket con datos sin leer provoca un RST (sobre todo en Windows) y el
+        // otro lado podría perder el último mensaje (PAIR_REJECT/UNPAIR).
+        let _ = tokio::time::timeout(Duration::from_millis(500), async { while ws.next().await.is_some_and(|r| r.is_ok()) {} }).await;
         self.cleanup_conn(conn_id, &mut ctx);
     }
 
