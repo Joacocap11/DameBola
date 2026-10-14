@@ -10,7 +10,7 @@ import { pluralSongs } from "../lib/format";
 import { api, errorMessage } from "../services/api";
 
 export function HomePage({ onGoToSongs }: { onGoToSongs: () => void }) {
-  const { songs, alertActive } = useAppState();
+  const { songs, alertActive, settings } = useAppState();
   const { devices } = useNetworkState();
   const { notify } = useToasts();
   const connected = devices.filter((d) => d.connection === "connected");
@@ -85,6 +85,7 @@ export function HomePage({ onGoToSongs }: { onGoToSongs: () => void }) {
         gigante y una canción al azar de tu biblioteca. Se cierra con el botón, con Escape o sola tras unos segundos, y
         tus aplicaciones siguen funcionando como siempre.
       </p>
+      {settings?.shortcutEnabled && <p className="text-sm text-zinc-300"><kbd className="rounded border border-zinc-600 px-2 py-1 font-mono">F12</kbd> envía DAME BOLA al compañero de Configuración, con esta ventana en primer plano.</p>}
     </div>
   );
 }

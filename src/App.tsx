@@ -3,12 +3,14 @@ import { Sidebar, type PageId } from "./components/Sidebar";
 import { ToastProvider } from "./components/Toasts";
 import { AppStateProvider, useAppState } from "./hooks/useAppState";
 import { NetworkStateProvider } from "./hooks/useNetworkState";
+import { useDameBolaShortcut } from "./hooks/useDameBolaShortcut";
 import { DevicesPage } from "./pages/DevicesPage";
 import { HomePage } from "./pages/HomePage";
 import { SongsPage } from "./pages/SongsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
 function Shell() {
+  useDameBolaShortcut();
   const [page, setPage] = useState<PageId>("home");
   const { info } = useAppState();
 

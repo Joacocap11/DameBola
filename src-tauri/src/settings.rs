@@ -26,6 +26,10 @@ pub struct Settings {
     pub sound_enabled: bool,
     pub animations_enabled: bool,
     pub launch_at_login: bool,
+    /// F12 en la ventana principal; nunca es un atajo global.
+    pub shortcut_enabled: bool,
+    /// None elige el único equipo emparejado; varios requieren selección.
+    pub shortcut_device_id: Option<String>,
 }
 
 impl Default for Settings {
@@ -37,6 +41,8 @@ impl Default for Settings {
             sound_enabled: true,
             animations_enabled: true,
             launch_at_login: false,
+            shortcut_enabled: true,
+            shortcut_device_id: None,
         }
     }
 }
@@ -61,6 +67,9 @@ impl Settings {
             return Err(AppError::Validation(format!(
                 "La duración debe estar entre {MIN_DURATION_SECS} y {MAX_DURATION_SECS} segundos."
             )));
+        }
+        if self.shortcut_device_id.as_ref().is_some_and(|id| !crate::net::protocol::is_device_id(id)) {
+            return Err(AppError::Validation("El destinatario del atajo no es válido.".into()));
         }
         Ok(self)
     }
@@ -146,6 +155,30 @@ mod tests {
         assert!(st.save(s.clone()).is_err());
         s.alert_duration_secs = 15;
         s.user_name = "   ".into();
+        assert!(st.save(s).is_err());
+    }
+
+    #[test]
+    fn phase2_settings_keep_preferences_when_shortcut_fields_are_missing() {
+        let old = r#"{"userName":"Ana","alertVolume":35,"soundEnabled":false,"launchAtLogin":true}"#;
+        let loaded: Settings = serde_json::from_str(old).unwrap();
+        assert_eq!(loaded.user_name, "Ana");
+        assert_eq!(loaded.alert_volume, 35);
+        assert!(!loaded.sound_enabled);
+        assert!(loaded.launch_at_login);
+        assert!(loaded.shortcut_enabled);
+        assert_eq!(loaded.shortcut_device_id, None);
+    }
+
+    #[test]
+    fn shortcut_target_and_disabled_state_persist() {
+        let st = store();
+        let mut s = st.get().unwrap();
+        s.shortcut_enabled = false;
+        s.shortcut_device_id = Some("a".repeat(32));
+        st.save(s.clone()).unwrap();
+        assert_eq!(st.get().unwrap(), s);
+        s.shortcut_device_id = Some("not-an-id".into());
         assert!(st.save(s).is_err());
     }
 }

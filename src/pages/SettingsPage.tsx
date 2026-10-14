@@ -3,6 +3,7 @@ import { RotateCcw, Save } from "lucide-react";
 import { Button, Card, PageHeader, Switch } from "../components/ui";
 import { useToasts } from "../components/Toasts";
 import { useAppState } from "../hooks/useAppState";
+import { useNetworkState } from "../hooks/useNetworkState";
 import type { Settings } from "../types";
 
 const DEFAULT_DURATION = 15;
@@ -23,6 +24,7 @@ function Row({ title, hint, children }: { title: string; hint?: string; children
 
 export function SettingsPage() {
   const { settings, saveSettings } = useAppState();
+  const { devices } = useNetworkState();
   const { notify } = useToasts();
   const [draft, setDraft] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
@@ -36,6 +38,8 @@ export function SettingsPage() {
   const patch = (p: Partial<Settings>) => setDraft({ ...draft, ...p });
   const dirty = JSON.stringify(draft) !== JSON.stringify(settings);
   const nameOk = draft.userName.trim().length > 0;
+  const paired = devices.filter((d) => d.pairing === "paired");
+  const missingTarget = draft.shortcutDeviceId !== null && !paired.some((d) => d.deviceId === draft.shortcutDeviceId);
 
   async function save() {
     if (!draft) return;
@@ -58,6 +62,21 @@ export function SettingsPage() {
       />
 
       <Card>
+        <Row title="Atajo F12" hint="Envía DAME BOLA con esta ventana en primer plano. No funciona con la app minimizada ni cerrada.">
+          <Switch checked={draft.shortcutEnabled} onChange={(v) => patch({ shortcutEnabled: v })} label="Activar atajo F12" />
+        </Row>
+
+        <Row title="Destinatario de F12" hint="Con un solo equipo emparejado se elige automáticamente. Si hay varios, seleccioná uno.">
+          <div className="w-56 space-y-2">
+            <select aria-label="Destinatario de F12" value={draft.shortcutDeviceId ?? ""} onChange={(e) => patch({ shortcutDeviceId: e.target.value || null })} className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm">
+              <option value="">Único equipo emparejado</option>
+              {missingTarget && <option value={draft.shortcutDeviceId!}>Equipo ya no emparejado</option>}
+              {paired.map((d) => <option key={d.deviceId} value={d.deviceId}>{d.name}</option>)}
+            </select>
+            {(missingTarget || (draft.shortcutDeviceId === null && paired.length !== 1)) && <p className="text-xs text-amber-400">{missingTarget ? "Elegí un equipo emparejado." : paired.length === 0 ? "Primero emparejá un equipo en Dispositivos." : "Elegí un destinatario para habilitar el envío."}</p>}
+          </div>
+        </Row>
+
         <Row title="Tu nombre" hint="Se muestra en los otros equipos y aparece como remitente de tus alertas.">
           <input value={draft.userName} maxLength={40} onChange={(e) => patch({ userName: e.target.value })} aria-invalid={!nameOk} className={`w-56 rounded-xl border bg-zinc-950 px-3 py-2 text-sm outline-none focus:border-red-500 ${nameOk ? "border-zinc-700" : "border-red-600"}`} />
         </Row>
