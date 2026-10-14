@@ -12,6 +12,8 @@ use tauri_plugin_dialog::DialogExt as _;
 use crate::alert::{self, AlertContext, AlertRequest, AlertStarted};
 use crate::audio::{PlaybackOrigin, PlaybackStatus};
 use crate::error::{AppError, AppResult};
+use crate::net::service::{AlertSendResult, DeviceView, NetStatus, PairingView};
+use crate::net::store::NetworkSettings;
 use crate::settings::Settings;
 use crate::songs::{ImportReport, Song};
 use crate::Services;
@@ -32,7 +34,7 @@ pub fn get_app_info(app: AppHandle, svc: Svc) -> AppResult<AppInfo> {
     Ok(AppInfo {
         version: app.package_info().version.to_string(),
         connection_mode: "local",
-        device_id: svc.settings.device_id()?,
+        device_id: svc.net.device_id().to_string(),
     })
 }
 
@@ -139,7 +141,9 @@ pub fn save_settings(app: AppHandle, svc: Svc, settings: Settings) -> AppResult<
             AppError::System(format!("No se pudo cambiar el inicio con el sistema: {e}"))
         })?;
     }
-    svc.settings.save(settings)
+    let saved = svc.settings.save(settings)?;
+    svc.net.refresh_announcement(); // el nombre visible puede haber cambiado
+    Ok(saved)
 }
 
 // ----------------------------------------------------------------- alertas
@@ -166,4 +170,67 @@ pub fn get_alert_context(svc: Svc) -> Option<AlertContext> {
 #[tauri::command]
 pub fn is_alert_active(svc: Svc) -> bool {
     svc.alerts.is_active()
+}
+
+// ------------------------------------------------------------- red (Fase 2)
+// El frontend nunca abre sockets: todo pasa por estos comandos.
+
+#[tauri::command]
+pub fn net_get_status(svc: Svc) -> NetStatus {
+    svc.net.status()
+}
+
+#[tauri::command]
+pub fn net_list_devices(svc: Svc) -> Vec<DeviceView> {
+    svc.net.devices()
+}
+
+#[tauri::command]
+pub fn net_get_pairing(svc: Svc) -> Vec<PairingView> {
+    svc.net.pairing()
+}
+
+#[tauri::command]
+pub fn net_get_settings(svc: Svc) -> NetworkSettings {
+    svc.net.settings()
+}
+
+#[tauri::command]
+pub async fn net_save_settings(svc: Svc<'_>, settings: NetworkSettings) -> AppResult<NetworkSettings> {
+    svc.net.save_settings(settings).await
+}
+
+#[tauri::command]
+pub async fn net_pair(svc: Svc<'_>, device_id: String) -> Result<(), String> {
+    svc.net.pair(&device_id).await
+}
+
+#[tauri::command]
+pub fn net_pairing_decision(svc: Svc, device_id: String, accept: bool) {
+    svc.net.pairing_decision(&device_id, accept);
+}
+
+#[tauri::command]
+pub async fn net_connect(svc: Svc<'_>, device_id: String) -> Result<(), String> {
+    svc.net.connect(&device_id).await
+}
+
+#[tauri::command]
+pub fn net_disconnect(svc: Svc, device_id: String) {
+    svc.net.disconnect(&device_id);
+}
+
+#[tauri::command]
+pub async fn net_forget(svc: Svc<'_>, device_id: String) -> AppResult<()> {
+    svc.net.forget(&device_id).await
+}
+
+#[tauri::command]
+pub async fn net_add_manual(svc: Svc<'_>, host: String, port: u16) -> Result<DeviceView, String> {
+    svc.net.add_manual(&host, port).await
+}
+
+#[tauri::command]
+pub async fn net_send_alert(svc: Svc<'_>, device_id: String) -> Result<AlertSendResult, String> {
+    Ok(svc.net.send_alert(&device_id).await)
 }
