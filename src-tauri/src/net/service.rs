@@ -481,6 +481,13 @@ impl NetworkService {
     pub fn connection_count(&self) -> usize {
         self.inner.st().conns.values().filter(|c| c.hello.is_some()).count()
     }
+
+    #[cfg(test)]
+    pub fn connection_ids(&self) -> Vec<u64> {
+        let mut ids: Vec<u64> = self.inner.st().conns.iter().filter(|(_, c)| c.hello.is_some()).map(|(id, _)| *id).collect();
+        ids.sort_unstable();
+        ids
+    }
 }
 
 // ------------------------------------------------------------ implementación
