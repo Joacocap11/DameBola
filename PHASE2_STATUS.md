@@ -27,6 +27,7 @@ Automáticas (`npm run typecheck`, `npm test`, `npm run test:rust`, `npm run bui
   - Antispam: rate limit por remitente, token bucket, deduplicación acotada y con TTL.
   - Migraciones: una base de Fase 1 con canciones y ajustes conserva todo tras migrar; idempotencia; restricciones.
   - **Integración con dos/tres instancias reales** (puertos distintos, 127.0.0.1): emparejamiento completo con códigos iguales; rechazo del receptor; «no coincide» del iniciador; expiración; **A→B y B→A**; no emparejado no puede enviar; abuso ⇒ conexión cerrada; revocación en ambos lados; receptor que borró el emparejamiento ⇒ `unauthorized`; **duplicados se procesan una vez**; rate limit; alertas desactivadas/silenciadas/ocupado/falla ≠ «mostrada»; destinatario desconectado ⇒ `offline`; reconexión automática; desconexión manual sin reconexión; certificado distinto ⇒ handshake falla; entradas manuales inválidas (incluye IP pública y el propio equipo); desactivar la red cierra el puerto; basura, mensajes gigantes, mensajes antes de `HELLO`, `deviceId` ajeno, tipos desconocidos y frames binarios cierran la conexión.
+- **CI en Windows y macOS** (runners oficiales): ejecutan todas las pruebas, incluida la integración en loopback con TLS+WebSocket reales. En Windows aparecieron dos problemas que macOS no mostró (un `PAIR_REJECT` perdido por cerrar el socket con datos sin leer, y el puerto que tarda unos ms en liberarse al reactivar la red); se corrigieron (cierre ordenado y reintento de `bind`) y la CI quedó en verde. Esto **no** equivale a probar dos equipos Windows/Mac reales.
 - Prueba ignorada `mdns_discovers_the_other_instance_and_expires_it_when_it_leaves`: pasó en esta Mac con una interfaz LAN real (`cargo test -- --ignored mdns`). No corre en CI (los runners no garantizan multicast).
 - Comprobado una vez a mano que `KeyringStore` guarda, lee y borra en el **Keychain de macOS** (prueba descartable).
 
@@ -40,7 +41,7 @@ Manuales en macOS con la app real (`npm run tauri dev`) contra un **proceso par 
 
 ## Pendiente / no verificado
 
-- **Dos equipos físicos (Mac ↔ Windows): no probado.** Tampoco Windows en absoluto (solo compila y pasa pruebas en CI).
+- **Dos equipos físicos (Mac ↔ Windows): no probado.** Windows solo se ejercitó en el runner de CI (compilación + pruebas automáticas); no hubo prueba manual con la interfaz, el firewall ni audio/ventanas.
 - Llavero real dentro de la app (macOS) y Windows Credential Manager: la ruta está implementada; en la prueba manual se usó el archivo de respaldo.
 - Suspensión/reanudación y cambio de IP reales: la lógica está implementada (salto de reloj, sondeo de interfaces cada 5 s) pero no se forzó en una máquina.
 - Reglas de firewall de Windows y permiso de «Red local» de macOS: documentados, no verificados en equipos reales.
