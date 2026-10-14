@@ -93,3 +93,9 @@ Solo se anuncia por las interfaces LAN en las que se escucha (IPv4 privadas o li
 ## Compatibilidad futura
 
 Un cambio incompatible incrementa `v`. Un par con otra versión no llega a procesarse (el mensaje se rechaza y se cierra la conexión).
+
+## Fase 2.5: aclaraciones (el protocolo **no cambió**: sigue en la versión 1)
+
+- **Significado de `ALERT_ACK stage=shown`:** el destinatario creó, posicionó y pidió mostrar **todas** las ventanas de alerta (una por monitor) sin error del sistema operativo. Si cualquier ventana falla, se cancelan todas las ya abiertas, **no suena audio** y se responde `ALERT_REJECT reason=failed` (error de visualización; el emisor ya recibió `accepted`). No garantiza que una persona haya visto la pantalla.
+- **Desconexión voluntaria:** cuando el usuario pulsa *Desconectar*, el cierre WebSocket usa el código `4001` (rango privado 4000–4999, razón `user-disconnect`). Un par que lo entiende no vuelve a conectarse solo; un par más viejo lo ve como un cierre normal. Un equipo desconectado a propósito también cierra con `4001` las conexiones entrantes de ese par. No se agregó ningún tipo de mensaje ni razón nuevos.
+- **Nombres:** el nombre del `HELLO` (autenticado por TLS) actualiza el *nombre anunciado* guardado; el alias local nunca viaja ni se sobrescribe. Los TXT de mDNS no escriben nada guardado.

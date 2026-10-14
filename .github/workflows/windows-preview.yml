@@ -1,8 +1,9 @@
-name: Windows shortcut preview installer
+name: Windows preview installer
 
+# Solo se ejecuta al subir una etiqueta `preview-installer-*` (después de que la CI haya pasado en el commit).
 on:
   push:
-    branches: [feature/phase2-hotkey]
+    tags: ["preview-installer-*"]
 
 permissions:
   contents: read
@@ -37,7 +38,7 @@ jobs:
           if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer" }
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $short = (git rev-parse --short=7 HEAD).Trim()
-          $name = "DameBola-$version-shortcut-$short-Windows-x64-setup.exe"
+          $name = "DameBola-$version-stability-$short-Windows-x64-setup.exe"
           $destination = "preview-download/$name"
           Copy-Item $installers[0].FullName $destination
           $hash = (Get-FileHash $destination -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -45,7 +46,7 @@ jobs:
           @("Version: $version", "Source commit: $(git rev-parse HEAD)", "Installer: $name") | Set-Content 'preview-download/SOURCE.txt' -Encoding ascii
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: DameBola-shortcut-Windows-x64
+          name: DameBola-preview-Windows-x64
           path: preview-download/*
           if-no-files-found: error
           retention-days: 14

@@ -28,6 +28,8 @@ src-tauri/src/           Backend (Rust)
     discovery.rs         mDNS (_damebola._tcp.local.)
     store.rs             SQLite: emparejados y ajustes de red
     antispam.rs          Rate limit, token bucket, deduplicación
+    ipfilter.rs          Política de direcciones (clasificación IPv4/IPv6, misma subred, interfaces)
+  instance.rs            Carpeta de datos aislada, bloqueo de instancia, variables de desarrollo
 ```
 
 ## Decisiones
@@ -60,3 +62,11 @@ flowchart LR
 - **Persistencia:** migración 2 agrega `device_identity` y `paired_devices`; no toca `songs` ni `settings`. Los ajustes de red van como JSON en `settings` (clave `network`).
 
 Detalles: [NETWORK_PROTOCOL.md](NETWORK_PROTOCOL.md), [PAIRING_SECURITY.md](PAIRING_SECURITY.md), [NETWORK_TROUBLESHOOTING.md](NETWORK_TROUBLESHOOTING.md).
+
+## Fase 2.5: estabilización
+
+- **Identidad (`net/identity.rs`):** `load_or_create` solo crea una identidad en una instalación sin ninguna evidencia previa. Con certificado existente busca la clave en todos los almacenes (solo lectura) y, si no aparece, devuelve `IdentityError` (la red no arranca, nada se toca). `NetworkService` mantiene `identity` opcional + el error y expone `retry_identity` / `reset_identity` (confirmado). Claves nuevas en ranuras `key-<fingerprint>`; migración 3 añade `identity_archive`.
+- **Direcciones (`net/ipfilter.rs`):** una única `AddrPolicy` para mDNS, conexión manual y reconexión (direcciones guardadas), con origen `Discovery` (misma subred obligatoria), `Stored` y `Manual`.
+- **Desconexión voluntaria:** `paired_devices.auto_connect` (persistente) + conjuntos `paused` / `remote_paused` en memoria; se comprueba al registrar el HELLO (cierra carreras con intentos en curso), en `connect_device` y en `reconnect_pass`. El aviso al par va como cierre WebSocket `4001`.
+- **Alertas (`alert.rs`):** `open_all` sobre los traits `Surface`/`WindowHandle` (Tauri en producción, simulado en pruebas) con política todo-o-nada; el audio solo suena tras abrir todas las ventanas.
+- **Nombres:** `name` (anunciado, autenticado) + `alias` (local) en `paired_devices`; mDNS solo alimenta la lista de descubiertos en memoria.
