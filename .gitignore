@@ -1,0 +1,68 @@
+# Dependencias y compilación
+node_modules/
+dist/
+target/
+src-tauri/target/
+src-tauri/gen/
+*.tsbuildinfo
+
+# Instaladores y artefactos generados
+*.dmg
+*.app
+*.msi
+*.exe
+*.AppImage
+*.deb
+*.rpm
+bundle/
+
+# Entorno y secretos
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.p8
+*.cer
+*.crt
+*.keystore
+*.jks
+*.mobileprovision
+# Firma del updater de Tauri
+*.tauri-signing-key*
+tauri-signing*
+
+# Datos locales y de usuario (bases de datos, audio importado, ajustes locales)
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+*.db-journal
+audio/
+*.mp3
+*.wav
+*.ogg
+*.flac
+*.m4a
+*.local.json
+
+# Logs y temporales
+*.log
+npm-debug.log*
+logs/
+tmp/
+*.tmp
+*.part
+
+# Sistema operativo y editores
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp

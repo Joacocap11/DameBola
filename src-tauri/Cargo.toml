@@ -1,0 +1,39 @@
+[package]
+name = "damebola"
+version = "0.1.0"
+license = "MIT"
+repository = "https://github.com/joacocap11/DameBola"
+description = "DameBola - alertas humorísticas entre compañeros de oficina"
+edition = "2021"
+
+[lib]
+name = "damebola_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "damebola"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[dependencies]
+fastrand = "2.5.0"
+rodio = { version = "0.23", default-features = false, features = ["playback", "mp3", "wav", "vorbis"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+tauri-plugin-autostart = "2"
+tauri-plugin-dialog = "2"
+thiserror = "2.0.21"
+uuid = { version = "1.20.0", features = ["v4"] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

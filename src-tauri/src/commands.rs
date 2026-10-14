@@ -1,0 +1,169 @@
+//! Comandos Tauri: capa fina entre el frontend y los servicios.
+//! El frontend nunca entrega rutas ni nombres de archivo; solo ids internos.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use serde::Serialize;
+use tauri::{AppHandle, State};
+use tauri_plugin_autostart::ManagerExt as _;
+use tauri_plugin_dialog::DialogExt as _;
+
+use crate::alert::{self, AlertContext, AlertRequest, AlertStarted};
+use crate::audio::{PlaybackOrigin, PlaybackStatus};
+use crate::error::{AppError, AppResult};
+use crate::settings::Settings;
+use crate::songs::{ImportReport, Song};
+use crate::Services;
+
+type Svc<'a> = State<'a, Arc<Services>>;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfo {
+    pub version: String,
+    /// "local" en la Fase 1. Fases futuras: "connected".
+    pub connection_mode: &'static str,
+    pub device_id: String,
+}
+
+#[tauri::command]
+pub fn get_app_info(app: AppHandle, svc: Svc) -> AppResult<AppInfo> {
+    Ok(AppInfo {
+        version: app.package_info().version.to_string(),
+        connection_mode: "local",
+        device_id: svc.settings.device_id()?,
+    })
+}
+
+// ------------------------------------------------------------- canciones
+
+#[tauri::command]
+pub fn list_songs(svc: Svc) -> AppResult<Vec<Song>> {
+    svc.songs.list()
+}
+
+/// Abre el selector nativo (el frontend no maneja rutas) e importa lo elegido.
+#[tauri::command]
+pub async fn import_songs(app: AppHandle, svc: Svc<'_>) -> AppResult<ImportReport> {
+    let services = Arc::clone(&svc);
+    tauri::async_runtime::spawn_blocking(move || {
+        let picked = app
+            .dialog()
+            .file()
+            .set_title("Agregar canciones")
+            .add_filter("Audio (MP3, WAV, OGG)", &["mp3", "wav", "ogg"])
+            .blocking_pick_files();
+        let Some(files) = picked else {
+            return Ok(ImportReport { cancelled: true, ..Default::default() });
+        };
+        let paths: Vec<PathBuf> = files.into_iter().filter_map(|f| f.into_path().ok()).collect();
+        Ok(services.songs.import_paths(&paths))
+    })
+    .await
+    .map_err(|e| AppError::System(format!("La importación se interrumpió: {e}")))?
+}
+
+#[tauri::command]
+pub fn rename_song(svc: Svc, id: String, name: String) -> AppResult<Song> {
+    svc.songs.rename(&id, &name)
+}
+
+#[tauri::command]
+pub fn set_song_enabled(svc: Svc, id: String, enabled: bool) -> AppResult<Song> {
+    svc.songs.set_enabled(&id, enabled)
+}
+
+#[tauri::command]
+pub fn delete_song(svc: Svc, id: String) -> AppResult<()> {
+    // Si suena justo esa canción, se detiene antes de borrar el archivo.
+    let status = svc.audio.status();
+    if status.song_id.as_deref() == Some(id.as_str()) {
+        svc.audio.stop()?;
+    }
+    svc.songs.delete(&id)
+}
+
+// ------------------------------------------------------------ reproducción
+
+#[tauri::command]
+pub fn play_song(svc: Svc, id: String) -> AppResult<()> {
+    if svc.alerts.is_active() {
+        return Err(AppError::Alert("No se puede reproducir mientras hay una alerta en curso.".into()));
+    }
+    let path = svc.songs.audio_path(&id)?;
+    let volume = svc.settings.get()?.alert_volume;
+    svc.audio.play(path, id, PlaybackOrigin::Preview, volume)
+}
+
+#[tauri::command]
+pub fn pause_playback(svc: Svc) -> AppResult<()> {
+    svc.audio.pause()
+}
+
+#[tauri::command]
+pub fn resume_playback(svc: Svc) -> AppResult<()> {
+    svc.audio.resume()
+}
+
+#[tauri::command]
+pub fn stop_playback(svc: Svc) -> AppResult<()> {
+    svc.audio.stop()
+}
+
+#[tauri::command]
+pub fn get_playback_status(svc: Svc) -> PlaybackStatus {
+    svc.audio.status()
+}
+
+// ------------------------------------------------------------ configuración
+
+#[tauri::command]
+pub fn get_settings(app: AppHandle, svc: Svc) -> AppResult<Settings> {
+    let mut settings = svc.settings.get()?;
+    // El estado real del sistema manda sobre lo guardado.
+    if let Ok(actual) = app.autolaunch().is_enabled() {
+        settings.launch_at_login = actual;
+    }
+    Ok(settings)
+}
+
+#[tauri::command]
+pub fn save_settings(app: AppHandle, svc: Svc, settings: Settings) -> AppResult<Settings> {
+    let settings = settings.validated()?;
+    let autostart = app.autolaunch();
+    let currently = autostart.is_enabled().unwrap_or(false);
+    if settings.launch_at_login != currently {
+        let result = if settings.launch_at_login { autostart.enable() } else { autostart.disable() };
+        result.map_err(|e| {
+            AppError::System(format!("No se pudo cambiar el inicio con el sistema: {e}"))
+        })?;
+    }
+    svc.settings.save(settings)
+}
+
+// ----------------------------------------------------------------- alertas
+
+/// Dispara la alerta local de prueba. `async` para que la creación de
+/// ventanas no bloquee el hilo principal (deadlock conocido en Windows).
+#[tauri::command]
+pub async fn trigger_alert(app: AppHandle, svc: Svc<'_>) -> AppResult<AlertStarted> {
+    let services = Arc::clone(&svc);
+    let sender_name = services.settings.get()?.user_name;
+    alert::start(&app, &services, AlertRequest { sender_name })
+}
+
+#[tauri::command]
+pub fn close_alert(app: AppHandle, svc: Svc) {
+    alert::end(&app, &svc, None);
+}
+
+#[tauri::command]
+pub fn get_alert_context(svc: Svc) -> Option<AlertContext> {
+    svc.alerts.context()
+}
+
+#[tauri::command]
+pub fn is_alert_active(svc: Svc) -> bool {
+    svc.alerts.is_active()
+}

@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Pruebas de frontend
+        run: npm test
+
+      - name: Build del frontend
+        run: npm run build
+
+      - name: Pruebas de Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      # Compila la app Tauri completa (sin generar instaladores).
+      # Las pruebas de audio/ventanas reales NO pueden ejecutarse en CI (sin dispositivo de audio ni pantalla).
+      - name: Compilar app Tauri
+        run: npx tauri build --no-bundle --debug

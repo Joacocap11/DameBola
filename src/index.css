@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --animate-fade-in: fade-in 0.25s ease-out both;
+  --animate-pop-in: pop-in 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+  --animate-alert-flash: alert-flash 0.9s ease-in-out infinite;
+  --animate-title-shake: title-shake 0.5s ease-in-out infinite;
+  --animate-pulse-ring: pulse-ring 1.8s ease-out infinite;
+
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes pop-in {
+    from { opacity: 0; transform: scale(0.94); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes alert-flash {
+    0%, 100% { background-color: #dc2626; }
+    50% { background-color: #ef4444; }
+  }
+  @keyframes title-shake {
+    0%, 100% { transform: rotate(-1.5deg) scale(1); }
+    50% { transform: rotate(1.5deg) scale(1.04); }
+  }
+  @keyframes pulse-ring {
+    0% { box-shadow: 0 0 0 0 rgb(220 38 38 / 0.55); }
+    100% { box-shadow: 0 0 0 22px rgb(220 38 38 / 0); }
+  }
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: #0a0a0b;
+  color: #f4f4f5;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+input, textarea { user-select: text; }
+
+/* Barras de desplazamiento discretas */
+* { scrollbar-width: thin; scrollbar-color: #3f3f46 transparent; }
+
+/* ---- Pollo animado (SVG + CSS). Ver src/config/alertMedia.ts para usar un GIF ---- */
+.chicken svg { overflow: visible; }
+.chicken [class^="ck-"] { transform-box: fill-box; }
+.chicken.is-animated .ck-body { transform-origin: 50% 100%; animation: ck-bounce 0.5s ease-in-out infinite; }
+.chicken.is-animated .ck-head { transform-origin: 50% 90%; animation: ck-head 0.5s ease-in-out infinite; }
+.chicken.is-animated .ck-wing-l { transform-origin: 100% 20%; animation: ck-flap-l 0.25s ease-in-out infinite alternate; }
+.chicken.is-animated .ck-wing-r { transform-origin: 0% 20%; animation: ck-flap-r 0.25s ease-in-out infinite alternate; }
+.chicken.is-animated .ck-leg-l { transform-origin: 50% 0%; animation: ck-leg 0.5s ease-in-out infinite; }
+.chicken.is-animated .ck-leg-r { transform-origin: 50% 0%; animation: ck-leg 0.5s ease-in-out infinite reverse; }
+.chicken.is-animated .ck-tail { transform-origin: 100% 100%; animation: ck-tail 0.25s ease-in-out infinite alternate; }
+
+@keyframes ck-bounce { 0%, 100% { transform: translateY(0) rotate(-3deg); } 50% { transform: translateY(-18px) rotate(3deg); } }
+@keyframes ck-head { 0%, 100% { transform: rotate(-8deg); } 50% { transform: rotate(8deg) translateY(-4px); } }
+@keyframes ck-flap-l { from { transform: rotate(10deg); } to { transform: rotate(-55deg); } }
+@keyframes ck-flap-r { from { transform: rotate(-10deg); } to { transform: rotate(55deg); } }
+@keyframes ck-leg { 0%, 100% { transform: rotate(18deg); } 50% { transform: rotate(-18deg); } }
+@keyframes ck-tail { from { transform: rotate(-6deg); } to { transform: rotate(12deg); } }
