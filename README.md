@@ -7,7 +7,7 @@ DameBola nació para dos compañeros de oficina (uno con macOS y otro con Window
 [![CI](https://github.com/joacocap11/DameBola/actions/workflows/ci.yml/badge.svg)](https://github.com/joacocap11/DameBola/actions/workflows/ci.yml)
 [![Licencia: MIT](https://img.shields.io/badge/licencia-MIT-red.svg)](LICENSE)
 
-> ⚠️ **Estado actual: Fase 1 (modo local).** La **comunicación entre computadoras todavía no está implementada**: hoy la alerta solo se puede probar en la misma máquina. Ver [Estado](#estado-actual) y [Roadmap](#roadmap).
+> ⚠️ **Estado actual: Fase 2 en revisión (rama `feature/phase2-p2p`).** La comunicación entre computadoras de la misma LAN está implementada, pero **todavía no fue probada entre dos equipos físicos ni en Windows**. En `main` (Fase 1) la comunicación entre computadoras **no existe**. Ver [Estado](#estado-actual) y [Roadmap](#roadmap).
 
 ## Capturas
 
@@ -21,11 +21,12 @@ Todavía no hay capturas publicadas.
 - Reproducción de prueba desde el listado (reproducir, pausar, detener).
 - Configuración persistente: nombre, volumen (0–100), duración, sonido, animaciones e inicio con el sistema.
 - Interfaz en español, tema oscuro y rojo.
-- Seguridad: el frontend no tiene acceso al sistema de archivos; todo se hace en Rust con ids internos.
+- Seguridad: el frontend no tiene acceso al sistema de archivos ni abre sockets; todo se hace en Rust con ids internos.
+- **Fase 2 (P2P en LAN, sin servidores ni Internet):** descubrimiento mDNS y conexión manual por IP y puerto, emparejamiento con código de verificación de 8 dígitos, identidad criptográfica por dispositivo, canal TLS 1.3 autenticado y cifrado, envío de alertas en ambos sentidos con confirmación real (`mostrada`), antispam (1 alerta cada 15 s por remitente), silencio temporal, desactivar alertas remotas o toda la red, heartbeats y reconexión automática. Ver [docs/NETWORK_PROTOCOL.md](docs/NETWORK_PROTOCOL.md) y [docs/PAIRING_SECURITY.md](docs/PAIRING_SECURITY.md).
 
 ## Tecnologías
 
-Tauri 2 · React 19 · TypeScript (estricto) · Vite · Tailwind CSS 4 · Rust · SQLite (`rusqlite`, embebido) · `rodio` (audio).
+Tauri 2 · React 19 · TypeScript (estricto) · Vite · Tailwind CSS 4 · Rust · SQLite (`rusqlite`, embebido) · `rodio` (audio) · `tokio` + `tokio-tungstenite` (WebSocket) · `rustls` (TLS 1.3) · `rcgen` · `mdns-sd` · `keyring`.
 
 ## Requisitos
 
@@ -66,6 +67,14 @@ npm run test:rust      # backend (cargo test)
 
 La integración continua (GitHub Actions) ejecuta typecheck, pruebas, build del frontend y compilación de la app Tauri en macOS y Windows. **No** puede probar audio real ni ventanas multimonitor (los runners no tienen dispositivo de audio ni pantallas reales); eso se verifica a mano.
 
+## Red entre equipos (Fase 2)
+
+1. Abrí **Dispositivos** en ambos equipos (misma red). Aparecen bajo «Descubiertos»; si mDNS está bloqueado, **Agregar dispositivo manualmente** (IP y puerto).
+2. **Emparejar** en uno: ambos muestran el mismo código de 8 dígitos. Comparenlo y confirmen en los dos.
+3. En el dispositivo emparejado, **DAME BOLA**. La interfaz solo dice «se mostró» cuando el otro equipo confirmó que la alerta ya está en pantalla.
+
+Puerto: **TCP 38473** (configurable), entrante. mDNS: UDP 5353 multicast (solo descubrimiento). No se toca el firewall ni el router y no se usa Internet. Guía de firewall y diagnóstico: [docs/NETWORK_TROUBLESHOOTING.md](docs/NETWORK_TROUBLESHOOTING.md).
+
 ## Datos de la aplicación
 
 | | Ubicación |
@@ -73,18 +82,20 @@ La integración continua (GitHub Actions) ejecuta typecheck, pruebas, build del 
 | macOS | `~/Library/Application Support/com.damebola.app/` |
 | Windows | `%APPDATA%\com.damebola.app\` |
 
-Contiene `damebola.db` (metadatos y ajustes) y `audio/` (copias de las canciones). Las canciones importadas nunca se incluyen en el repositorio.
+Contiene `damebola.db` (metadatos, ajustes, certificado público y dispositivos emparejados) y `audio/` (copias de las canciones). La **clave privada** del dispositivo va en el llavero del sistema (o, si no está disponible, en `device.key` con permisos restringidos). Nada de esto se incluye en el repositorio.
 
 ## Estado actual
 
 - Probado manualmente **solo en macOS** (Apple Silicon, 3 monitores): ABM, reproducción, alertas multimonitor, ajustes.
+- **Fase 2:** pruebas automáticas con instancias reales en un mismo proceso (emparejamiento, alertas en ambos sentidos, revocación, antispam, protocolo inválido, reconexión) y una prueba manual de la app real contra un proceso par en la misma Mac, incluyendo mDNS. **No** se probó entre dos computadoras físicas.
 - **Windows no fue probado manualmente.** La CI comprueba que compila y que pasan las pruebas automáticas, nada más.
 - El inicio con el sistema está implementado pero no verificado.
 - Detalle completo en [PHASE1_STATUS.md](PHASE1_STATUS.md).
 
 ## Limitaciones conocidas
 
-- Sin comunicación entre equipos ni sincronización de canciones (fases siguientes).
+- No hay sincronización de canciones (Fase 3). La comunicación entre equipos (Fase 2) solo funciona en la misma LAN, IPv4.
+- Entre equipos: si no se comparan los códigos al emparejar, un intermediario no se detecta (ver [docs/PAIRING_SECURITY.md](docs/PAIRING_SECURITY.md)).
 - macOS: el Dock y la barra de menú pueden quedar visibles sobre la alerta; una app en pantalla completa nativa puede quedar por encima.
 - Windows: la barra de tareas puede quedar por encima si el usuario la activa; el posicionamiento con monitores de DPI distinto no está verificado.
 - Escape requiere que la ventana de alerta tenga el foco; los botones funcionan siempre.
@@ -93,7 +104,7 @@ Contiene `damebola.db` (metadatos y ajustes) y `audio/` (copias de las canciones
 ## Roadmap
 
 1. **Fase 1** ✅ Aplicación local: ABM de canciones, alertas multimonitor, configuración.
-2. **Fase 2** Comunicación entre dos computadoras (WebSocket) y sección «Dispositivos»: enviar una alerta al otro equipo.
+2. **Fase 2** 🔎 Comunicación P2P en LAN y sección «Dispositivos»: implementada en la rama `feature/phase2-p2p` (PR abierto); falta probarla entre dos equipos físicos (macOS y Windows).
 3. **Fase 3** Sincronización de la biblioteca de canciones entre equipos.
 4. Verificación y empaquetado en Windows; instaladores firmados.
 
