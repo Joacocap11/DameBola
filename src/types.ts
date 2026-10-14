@@ -73,6 +73,14 @@ export interface AlertStarted {
 
 export type NetOs = "macos" | "windows" | "linux" | "other";
 
+export interface NetIdentity {
+  state: "ok" | "error";
+  code: "key_missing" | "key_mismatch" | "store_unavailable" | "cert_missing" | "cert_corrupt" | "internal" | (string & {}) | null;
+  message: string | null;
+  /** `true` si se puede crear una identidad nueva. */
+  canReset: boolean;
+}
+
 export interface NetStatus {
   enabled: boolean;
   state: "stopped" | "starting" | "running" | "error";
@@ -88,6 +96,7 @@ export interface NetStatus {
   mdns: "active" | "disabled" | "error";
   mdnsError: string | null;
   keyStorage: "keychain" | "file";
+  identity: NetIdentity;
 }
 
 export interface DeviceView {
@@ -103,6 +112,12 @@ export interface DeviceView {
   port: number | null;
   /** Milisegundos desde epoch. */
   lastSeenMs: number | null;
+  /** Último nombre anunciado por el dispositivo (autenticado). */
+  announcedName: string | null;
+  /** Nombre personalizado local. `name` ya es el nombre a mostrar (alias o anunciado). */
+  alias: string | null;
+  /** `false` = el usuario lo desconectó a propósito; no reconecta solo hasta pulsar Conectar. */
+  autoConnect: boolean;
   lastError: string | null;
 }
 

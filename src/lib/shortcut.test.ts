@@ -6,7 +6,7 @@ import {
 import type { AlertSendResult, DeviceView, Settings } from "../types";
 
 const settings: Settings = { userName: "Ana", alertVolume: 80, alertDurationSecs: 15, soundEnabled: true, animationsEnabled: true, launchAtLogin: false, shortcutEnabled: true, shortcutKey: "F12", shortcutDeviceId: null };
-const device = (id: string, connected = true): DeviceView => ({ deviceId: id, name: id, os: "windows", connection: connected ? "connected" : "disconnected", pairing: "paired", discovered: true, addresses: [], port: 38473, lastSeenMs: null, lastError: null });
+const device = (id: string, connected = true): DeviceView => ({ deviceId: id, name: id, announcedName: id, alias: null, autoConnect: true, os: "windows", connection: connected ? "connected" : "disconnected", pairing: "paired", discovered: true, addresses: [], port: 38473, lastSeenMs: null, lastError: null });
 const key = (patch: Record<string, unknown> = {}) => ({ code: "F12", repeat: false, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, isComposing: false, defaultPrevented: false, preventDefault: vi.fn(), ...patch });
 const shown: AlertSendResult = { status: "shown", accepted: true, reason: null, message: "Mostrada" };
 

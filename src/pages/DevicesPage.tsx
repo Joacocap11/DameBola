@@ -10,11 +10,13 @@ import {
   Plus,
   ShieldCheck,
   Siren,
+  Pencil,
+  RefreshCw,
   Trash2,
   Wifi,
 } from "lucide-react";
 import { useToasts } from "../components/Toasts";
-import { Button, Card, Modal, PageHeader, Switch } from "../components/ui";
+import { Button, Card, IconButton, Modal, PageHeader, Switch } from "../components/ui";
 import { useNetworkState } from "../hooks/useNetworkState";
 import {
   formatRelativeTime,
@@ -27,7 +29,16 @@ import {
   type MuteOption,
 } from "../lib/network";
 import { api, errorMessage } from "../services/api";
-import type { DeviceView, NetStatus, NetworkSettings, PairingView } from "../types";
+import {
+  announcedAsLabel,
+  connectionLabel,
+  IDENTITY_DOCS_PATH,
+  isResetConfirmed,
+  MAX_ALIAS_LENGTH,
+  RESET_CONFIRMATION,
+  validateAlias,
+} from "../lib/devices";
+import type { DeviceView, NetIdentity, NetStatus, NetworkSettings, PairingView } from "../types";
 
 const STATE_LABEL: Record<NetStatus["state"], { text: string; dot: string }> = {
   stopped: { text: "Detenido", dot: "bg-zinc-500" },
@@ -54,6 +65,8 @@ export function DevicesPage() {
   const [forgetTarget, setForgetTarget] = useState<DeviceView | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [dismissed, setDismissed] = useState<string | null>(null);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<DeviceView | null>(null);
 
   const toggle = (set: ReadonlySet<string>, id: string, on: boolean): Set<string> => {
     const next = new Set(set);
@@ -115,6 +128,8 @@ export function DevicesPage() {
   const paired = devices.filter((d) => d.pairing === "paired");
   const discovered = devices.filter((d) => d.pairing !== "paired" && d.discovered);
   const activePairing = pairings.find((p) => p.state === "active" || `${p.deviceId}:${p.state}` !== dismissed) ?? null;
+  const identityError = status.identity.state === "error";
+  const networkUp = !identityError;
 
   return (
     <div className="mx-auto max-w-3xl animate-fade-in space-y-8 pb-8">
@@ -122,12 +137,18 @@ export function DevicesPage() {
         title="Dispositivos"
         subtitle="Conectá tus computadoras de la misma red para mandarles DAME BOLA."
         actions={
-          <Button variant="primary" icon={<Plus className="size-4" />} onClick={() => setAddOpen(true)}>
+          <Button
+            variant="primary"
+            icon={<Plus className="size-4" />}
+            disabled={!networkUp}
+            onClick={() => setAddOpen(true)}
+          >
             Agregar dispositivo manualmente
           </Button>
         }
       />
 
+      {identityError && <IdentityErrorCard identity={status.identity} onReset={() => setResetOpen(true)} />}
       <ThisDevice status={status} />
       <NetworkSettingsCard settings={settings} onSave={saveSettings} now={now} />
 
@@ -143,7 +164,7 @@ export function DevicesPage() {
                   variant="primary"
                   icon={<ShieldCheck className="size-4" />}
                   loading={busy.has(d.deviceId)}
-                  disabled={d.pairing === "pending"}
+                  disabled={d.pairing === "pending" || !networkUp}
                   onClick={() => void run(d.deviceId, () => api.netPair(d.deviceId))}
                 >
                   {d.pairing === "pending" ? "Emparejando…" : "Emparejar"}
@@ -168,7 +189,7 @@ export function DevicesPage() {
                     variant="primary"
                     icon={sending.has(d.deviceId) ? undefined : <Siren className="size-4" />}
                     loading={sending.has(d.deviceId)}
-                    disabled={!connected}
+                    disabled={!connected || !networkUp}
                     onClick={() => void sendAlert(d)}
                   >
                     {sending.has(d.deviceId) ? "Enviando…" : "DAME BOLA"}
@@ -183,13 +204,18 @@ export function DevicesPage() {
                     </Button>
                   ) : (
                     <Button
+                      variant={d.autoConnect || d.connection === "connecting" ? "secondary" : "primary"}
                       icon={<Link2 className="size-4" />}
                       loading={busy.has(d.deviceId) || d.connection === "connecting"}
+                      disabled={!networkUp}
                       onClick={() => void run(d.deviceId, () => api.netConnect(d.deviceId))}
                     >
                       {d.connection === "connecting" ? "Conectando…" : "Conectar"}
                     </Button>
                   )}
+                  <IconButton label="Cambiar nombre" onClick={() => setRenameTarget(d)}>
+                    <Pencil className="size-4" />
+                  </IconButton>
                   <Button variant="danger" icon={<Trash2 className="size-4" />} onClick={() => setForgetTarget(d)}>
                     Olvidar
                   </Button>
@@ -225,6 +251,9 @@ export function DevicesPage() {
         </Modal>
       )}
 
+      {resetOpen && <ResetIdentityModal onClose={() => setResetOpen(false)} />}
+      {renameTarget && <RenameModal device={renameTarget} onClose={() => setRenameTarget(null)} />}
+
       {activePairing && (
         <PairingModal
           pairing={activePairing}
@@ -251,9 +280,9 @@ function DeviceIcon({ os }: { os: DeviceView["os"] }) {
 function ConnectionBadge({ device }: { device: DeviceView }) {
   if (device.pairing !== "paired") return null;
   const map = {
-    connected: { text: "Conectado", cls: "text-emerald-400", dot: "bg-emerald-400" },
-    connecting: { text: "Conectando…", cls: "text-amber-400", dot: "bg-amber-400" },
-    disconnected: { text: "Desconectado", cls: "text-zinc-400", dot: "bg-zinc-500" },
+    connected: { text: connectionLabel(device), cls: "text-emerald-400", dot: "bg-emerald-400" },
+    connecting: { text: connectionLabel(device), cls: "text-amber-400", dot: "bg-amber-400" },
+    disconnected: { text: connectionLabel(device), cls: "text-zinc-400", dot: "bg-zinc-500" },
   }[device.connection];
   return (
     <span className={`inline-flex items-center gap-1.5 text-xs font-semibold ${map.cls}`}>
@@ -265,6 +294,8 @@ function ConnectionBadge({ device }: { device: DeviceView }) {
 
 function DeviceRow({ device, now, children }: { device: DeviceView; now: number; children: React.ReactNode }) {
   const where = device.addresses.length > 0 ? `${device.addresses[0]}${device.port ? `:${device.port}` : ""}` : null;
+  const announcedAs = announcedAsLabel(device);
+  const byUser = device.pairing === "paired" && device.connection === "disconnected" && !device.autoConnect;
   return (
     <Card className="flex flex-wrap items-center gap-4 p-4">
       <DeviceIcon os={device.os} />
@@ -273,6 +304,7 @@ function DeviceRow({ device, now, children }: { device: DeviceView; now: number;
           <span className="truncate font-semibold">{device.name}</span>
           <ConnectionBadge device={device} />
         </div>
+        {announcedAs && <p className="mt-0.5 text-xs text-zinc-500">{announcedAs}</p>}
         <p className="mt-0.5 text-xs text-zinc-500">
           {osLabel(device.os)}
           {where && ` · ${where}`}
@@ -280,7 +312,7 @@ function DeviceRow({ device, now, children }: { device: DeviceView; now: number;
             ? " · activo ahora"
             : device.lastSeenMs !== null && ` · visto ${formatRelativeTime(device.lastSeenMs, now)}`}
         </p>
-        {device.lastError && <p className="mt-1 text-xs text-amber-400">{device.lastError}</p>}
+        {device.lastError && !byUser && <p className="mt-1 text-xs text-amber-400">{device.lastError}</p>}
       </div>
       <div className="flex flex-wrap items-center gap-2">{children}</div>
     </Card>
@@ -302,14 +334,14 @@ function ThisDevice({ status }: { status: NetStatus }) {
             </span>
             <span className="text-xs text-zinc-500">Este equipo · {osLabel(status.os)}</span>
           </div>
-          {status.error && <p className="mt-1 text-sm text-red-400">{status.error}</p>}
+          {status.error && status.identity.state !== "error" && <p className="mt-1 text-sm text-red-400">{status.error}</p>}
           <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
             <dt className="text-zinc-500">Direcciones</dt>
             <dd className="text-zinc-200">{status.addresses.length > 0 ? status.addresses.join(", ") : "Sin red local detectada"}</dd>
             <dt className="text-zinc-500">Puerto</dt>
             <dd className="text-zinc-200">{status.port}</dd>
             <dt className="text-zinc-500">Huella</dt>
-            <dd className="break-all font-mono text-xs text-zinc-200">{status.fingerprint}</dd>
+            <dd className="break-all font-mono text-xs text-zinc-200">{status.fingerprint || "—"}</dd>
             <dt className="text-zinc-500">Descubrimiento</dt>
             <dd className="text-zinc-200">
               {status.mdns === "active" && "Automático (mDNS) activo"}
@@ -571,6 +603,191 @@ function PairingModal({ pairing, onClose }: { pairing: PairingView; onClose: () 
           </Button>
         )}
       </div>
+    </Modal>
+  );
+}
+
+function IdentityErrorCard({ identity, onReset }: { identity: NetIdentity; onReset: () => void }) {
+  const { notify } = useToasts();
+  const [retrying, setRetrying] = useState(false);
+
+  async function retry() {
+    setRetrying(true);
+    try {
+      const st = await api.netRetryIdentity();
+      if (st.identity.state === "ok") notify("success", "La identidad de este equipo se recuperó correctamente.");
+      else notify("warning", st.identity.message ?? "La identidad sigue sin poder cargarse.");
+    } catch (e) {
+      notify("error", errorMessage(e));
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  return (
+    <Card className="border-red-800 bg-red-950/40 p-5" >
+      <div className="flex items-start gap-3">
+        <AlertTriangle className="mt-0.5 size-6 shrink-0 text-amber-400" />
+        <div className="min-w-0 flex-1">
+          <h2 className="text-lg font-bold text-red-200">La identidad de este equipo no está disponible</h2>
+          <p className="mt-1 text-sm text-red-300">
+            {identity.message ?? "No se pudo cargar la identidad de este equipo."}
+          </p>
+          <p className="mt-2 text-sm text-zinc-300">
+            No se creó una identidad nueva a propósito: eso rompería los emparejamientos existentes. La red local está
+            detenida hasta que se resuelva.
+          </p>
+          <p className="mt-2 text-xs text-zinc-400">
+            Más información: <code className="font-mono text-zinc-300">{IDENTITY_DOCS_PATH}</code>
+          </p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button
+              variant="primary"
+              loading={retrying}
+              icon={retrying ? undefined : <RefreshCw className="size-4" />}
+              onClick={() => void retry()}
+            >
+              Reintentar
+            </Button>
+            {identity.canReset && (
+              <Button variant="danger" disabled={retrying} onClick={onReset}>
+                Crear identidad nueva…
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function ResetIdentityModal({ onClose }: { onClose: () => void }) {
+  const { notify } = useToasts();
+  const [text, setText] = useState("");
+  const [resetting, setResetting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!isResetConfirmed(text) || resetting) return;
+    setResetting(true);
+    setError(null);
+    try {
+      const st = await api.netResetIdentity(RESET_CONFIRMATION);
+      if (st.identity.state === "ok") notify("success", "Se creó una identidad nueva. Volvé a emparejar tus dispositivos.");
+      else notify("warning", st.identity.message ?? "No se pudo crear la identidad nueva.");
+      onClose();
+    } catch (err) {
+      setError(errorMessage(err));
+      setResetting(false);
+    }
+  }
+
+  return (
+    <Modal title="Crear identidad nueva" onClose={resetting ? () => undefined : onClose}>
+      <form onSubmit={(e) => void submit(e)} className="space-y-4">
+        <ul className="list-disc space-y-1.5 pl-5 text-sm text-zinc-300">
+          <li>
+            Los otros dispositivos van a tener que emparejarse de nuevo: hay que usar <strong>Olvidar</strong> y{" "}
+            <strong>Emparejar</strong> en ambos equipos.
+          </li>
+          <li>El certificado anterior se archiva, no se borra.</li>
+        </ul>
+        <label className="block text-sm">
+          <span className="mb-1 block text-zinc-400">
+            Para confirmar, escribí exactamente <code className="font-mono text-zinc-200">{RESET_CONFIRMATION}</code>
+          </span>
+          <input
+            autoFocus
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono outline-none focus:border-red-500"
+          />
+        </label>
+        {error && (
+          <p className="flex items-start gap-2 text-sm text-red-400">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+            {error}
+          </p>
+        )}
+        <div className="flex justify-end gap-2 pt-2">
+          <Button type="button" variant="ghost" disabled={resetting} onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button type="submit" variant="danger" loading={resetting} disabled={!isResetConfirmed(text)}>
+            Crear identidad nueva
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function RenameModal({ device, onClose }: { device: DeviceView; onClose: () => void }) {
+  const { notify } = useToasts();
+  const [text, setText] = useState(device.alias ?? device.name);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const validation = validateAlias(text);
+
+  async function save(alias: string | null) {
+    setSaving(true);
+    setError(null);
+    try {
+      await api.netRenameDevice(device.deviceId, alias);
+      notify("success", alias ? "Nombre guardado." : "Se quitó el nombre personalizado.");
+      onClose();
+    } catch (err) {
+      setError(errorMessage(err));
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal title="Cambiar nombre" onClose={saving ? () => undefined : onClose}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!validation && !saving) void save(text.trim() === "" ? null : text.trim());
+        }}
+        className="space-y-4"
+      >
+        <label className="block text-sm">
+          <span className="mb-1 block text-zinc-400">Nombre para este dispositivo</span>
+          <input
+            autoFocus
+            maxLength={MAX_ALIAS_LENGTH}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 outline-none focus:border-red-500"
+          />
+          {validation && <span className="mt-1 block text-xs text-red-400">{validation}</span>}
+        </label>
+        {device.announcedName && (
+          <p className="text-xs text-zinc-500">El dispositivo se anuncia como «{device.announcedName}».</p>
+        )}
+        {error && (
+          <p className="flex items-start gap-2 text-sm text-red-400">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+            {error}
+          </p>
+        )}
+        <div className="flex justify-end gap-2 pt-2">
+          <Button type="button" variant="ghost" disabled={saving} onClick={onClose}>
+            Cancelar
+          </Button>
+          {device.alias && (
+            <Button type="button" disabled={saving} onClick={() => void save(null)}>
+              Quitar alias
+            </Button>
+          )}
+          <Button type="submit" variant="primary" loading={saving} disabled={validation !== null}>
+            Guardar
+          </Button>
+        </div>
+      </form>
     </Modal>
   );
 }
