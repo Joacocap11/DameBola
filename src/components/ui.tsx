@@ -64,21 +64,25 @@ export function Switch({ checked, onChange, label, disabled }: { checked: boolea
   );
 }
 
-export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+/** `locked`: no se cierra con fondo, Escape ni la X (solo con los botones del contenido). */
+export function Modal({ title, onClose, children, locked = false }: { title: string; onClose: () => void; children: ReactNode; locked?: boolean }) {
   useEffect(() => {
+    if (locked) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, locked]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm animate-fade-in" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm animate-fade-in" onMouseDown={locked ? undefined : onClose}>
       <div role="dialog" aria-modal="true" aria-label={title} onMouseDown={(e) => e.stopPropagation()} className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl animate-pop-in">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-bold">{title}</h2>
-          <IconButton label="Cerrar" onClick={onClose}>
-            <X className="size-4" />
-          </IconButton>
+          {!locked && (
+            <IconButton label="Cerrar" onClick={onClose}>
+              <X className="size-4" />
+            </IconButton>
+          )}
         </div>
         {children}
       </div>

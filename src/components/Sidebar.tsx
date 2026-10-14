@@ -1,12 +1,12 @@
-import { Home, Music2, Settings as SettingsIcon, type LucideIcon } from "lucide-react";
+import { Home, Music2, Network, Settings as SettingsIcon, type LucideIcon } from "lucide-react";
 
-export type PageId = "home" | "songs" | "settings";
+export type PageId = "home" | "songs" | "devices" | "settings";
 
-// Para sumar una sección (p. ej. "Dispositivos" en una fase futura) basta con
-// agregar una entrada aquí y su página en App.tsx.
+// Para sumar una sección basta con agregar una entrada aquí y su página en App.tsx.
 const NAV: { id: PageId; label: string; icon: LucideIcon }[] = [
   { id: "home", label: "Inicio", icon: Home },
   { id: "songs", label: "Canciones", icon: Music2 },
+  { id: "devices", label: "Dispositivos", icon: Network },
   { id: "settings", label: "Configuración", icon: SettingsIcon },
 ];
 
@@ -35,7 +35,7 @@ export function Sidebar({ page, onNavigate, version }: { page: PageId; onNavigat
           );
         })}
       </nav>
-      {version && <p className="px-2 text-xs text-zinc-600">v{version} · Fase 1</p>}
+      {version && <p className="px-2 text-xs text-zinc-600">v{version} · Fase 2</p>}
     </aside>
   );
 }

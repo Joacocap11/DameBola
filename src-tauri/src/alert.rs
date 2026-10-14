@@ -21,6 +21,7 @@ use crate::Services;
 
 pub const ALERT_LABEL_PREFIX: &str = "alert-";
 pub const EVENT_ALERT_STATE: &str = "alert://state";
+pub const ALREADY_ACTIVE_MSG: &str = "Ya hay una alerta en curso.";
 
 pub fn is_alert_label(label: &str) -> bool {
     label.starts_with(ALERT_LABEL_PREFIX)
@@ -87,7 +88,7 @@ pub fn start(app: &AppHandle, services: &Arc<Services>, request: AlertRequest) -
     let (generation, last_song_id) = {
         let mut inner = manager.lock();
         if inner.active {
-            return Err(AppError::Alert("Ya hay una alerta en curso.".into()));
+            return Err(AppError::Alert(ALREADY_ACTIVE_MSG.into()));
         }
         inner.active = true;
         inner.generation += 1;

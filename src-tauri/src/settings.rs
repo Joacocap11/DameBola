@@ -9,7 +9,6 @@ use crate::db::Database;
 use crate::error::{AppError, AppResult};
 
 const KEY_APP: &str = "app";
-const KEY_DEVICE_ID: &str = "device_id";
 
 pub const DEFAULT_DURATION_SECS: u32 = 15;
 pub const MIN_DURATION_SECS: u32 = 3;
@@ -107,16 +106,6 @@ impl SettingsStore {
         self.write(KEY_APP, &json)?;
         Ok(settings)
     }
-
-    /// Identificador estable de esta instalación (para fases de sincronización).
-    pub fn device_id(&self) -> AppResult<String> {
-        if let Some(id) = self.read(KEY_DEVICE_ID)? {
-            return Ok(id);
-        }
-        let id = uuid::Uuid::new_v4().to_string();
-        self.write(KEY_DEVICE_ID, &id)?;
-        Ok(id)
-    }
 }
 
 #[cfg(test)]
@@ -158,11 +147,5 @@ mod tests {
         s.alert_duration_secs = 15;
         s.user_name = "   ".into();
         assert!(st.save(s).is_err());
-    }
-
-    #[test]
-    fn device_id_is_stable() {
-        let st = store();
-        assert_eq!(st.device_id().unwrap(), st.device_id().unwrap());
     }
 }

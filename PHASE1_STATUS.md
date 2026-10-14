@@ -1,5 +1,7 @@
 # Estado de la Fase 1
 
+> La comunicación entre equipos se desarrolla en la Fase 2: ver [PHASE2_STATUS.md](PHASE2_STATUS.md).
+
 Verificado en: macOS (Apple Silicon), 3 monitores, Tauri 2.12, Rust 1.98, Node 24.
 **Windows no fue probado** (no hay equipo disponible en este entorno).
 
