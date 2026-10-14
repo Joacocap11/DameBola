@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -14,7 +14,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::WebSocketStream;
 use tokio_util::sync::CancellationToken;
@@ -22,7 +23,8 @@ use uuid::Uuid;
 
 use super::antispam::{DedupCache, RateLimiter, TokenBucket};
 use super::discovery::{Announce, Discovery, DiscoveryEvent, Found};
-use super::identity::{device_id_from_fingerprint, format_fingerprint, hex, Fingerprint, Identity, KeyStorage};
+use super::identity::{device_id_from_fingerprint, format_fingerprint, hex, Fingerprint, Identity, IdentityError, KeyStorage};
+use super::ipfilter::{self, AddrPolicy, Origin};
 use super::protocol::*;
 use super::store::{NetStore, NetworkSettings, PairedDevice};
 use super::tls::{self, PeerPin, SERVER_NAME};
@@ -32,8 +34,20 @@ use crate::error::AppResult;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct IdentityStatus {
+    /// "ok" | "error"
+    pub state: &'static str,
+    pub code: Option<&'static str>,
+    pub message: Option<String>,
+    /// Se ofrece «crear identidad nueva» (acción explícita y confirmada).
+    pub can_reset: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct NetStatus {
     pub enabled: bool,
+    pub identity: IdentityStatus,
     pub state: &'static str,
     pub error: Option<String>,
     pub device_id: String,
@@ -51,7 +65,14 @@ pub struct NetStatus {
 #[serde(rename_all = "camelCase")]
 pub struct DeviceView {
     pub device_id: String,
+    /// Nombre que ve el usuario: el alias local si existe; si no, el nombre anunciado.
     pub name: String,
+    /// Último nombre anunciado por el propio dispositivo (autenticado en un HELLO, o visto en mDNS
+    /// si todavía no está emparejado). Nunca reemplaza al alias.
+    pub announced_name: Option<String>,
+    pub alias: Option<String>,
+    /// `false` = desconectado a propósito por el usuario: no se reconecta solo.
+    pub auto_connect: bool,
     pub os: String,
     pub connection: &'static str,
     pub pairing: &'static str,
@@ -157,6 +178,28 @@ pub struct NetConfig {
     pub mdns: bool,
     pub timings: NetTimings,
     pub name: Arc<dyn Fn() -> String + Send + Sync>,
+    /// Pruebas / desarrollo aislado: admite 127.0.0.0/8 como destino.
+    pub allow_loopback: bool,
+}
+
+/// Origen de la identidad del dispositivo (cargar al arrancar, recuperar por orden del usuario).
+pub trait IdentityProvider: Send + Sync {
+    fn load(&self) -> Result<Identity, IdentityError>;
+    fn reset(&self) -> Result<Identity, IdentityError>;
+}
+
+pub struct StoreIdentityProvider {
+    pub store: NetStore,
+    pub backends: super::identity::SecretBackends,
+}
+
+impl IdentityProvider for StoreIdentityProvider {
+    fn load(&self) -> Result<Identity, IdentityError> {
+        super::identity::load_or_create(&self.store, &self.backends)
+    }
+    fn reset(&self) -> Result<Identity, IdentityError> {
+        super::identity::reset_identity(&self.store, &self.backends, "recuperación confirmada por el usuario")
+    }
 }
 
 pub fn current_os() -> &'static str {
@@ -174,9 +217,16 @@ const MAX_CONNS: usize = 32;
 const MAX_HANDSHAKES: usize = 16;
 const MAX_PAIRING_SESSIONS: usize = 3;
 const PAIRING_REQUEST_COOLDOWN: Duration = Duration::from_secs(10);
+/// Texto que el usuario debe escribir para crear una identidad nueva.
+pub const RESET_CONFIRMATION: &str = "NUEVA IDENTIDAD";
 const MAX_STRIKES: u32 = 3;
+/// Código de cierre WebSocket (rango privado 4000-4999) = «desconexión voluntaria». Los pares que no
+/// lo conocen simplemente ven un cierre normal: no cambia el protocolo de mensajes.
+const USER_DISCONNECT_CODE: u16 = 4001;
 
 struct Conn {
+    /// Se pone en `true` cuando ESTE equipo corta a propósito: se envía un cierre WebSocket 4001.
+    voluntary: Arc<AtomicBool>,
     fp: Fingerprint,
     addr: SocketAddr,
     initiator_local: bool,
@@ -250,11 +300,14 @@ struct State {
     pairing_requests: HashMap<String, Instant>,
     /// Dispositivos que el usuario desconectó a propósito: no se reconectan solos.
     paused: HashSet<String>,
+    /// El otro equipo nos cortó a propósito (cierre 4001): no se reintenta hasta que vuelva él o el usuario conecte.
+    remote_paused: HashSet<String>,
 }
 
 struct Inner {
-    identity: Identity,
-    device_id: String,
+    identity: Mutex<Option<Arc<Identity>>>,
+    identity_error: Mutex<Option<IdentityError>>,
+    provider: Arc<dyn IdentityProvider>,
     store: NetStore,
     events: Arc<dyn NetEvents>,
     alerts: Arc<dyn AlertHandler>,
@@ -270,6 +323,7 @@ pub struct NetworkService {
 }
 
 struct SessionMeta {
+    voluntary: Arc<AtomicBool>,
     conn_id: u64,
     cancel: CancellationToken,
     ready: Option<oneshot::Sender<Result<String, String>>>,
@@ -290,21 +344,7 @@ fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-/// Direcciones IPv4 de LAN (privadas o link-local) de interfaces activas.
-pub fn lan_addresses() -> Vec<IpAddr> {
-    let mut out: Vec<IpAddr> = if_addrs::get_if_addrs()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|i| !i.is_loopback() && i.is_oper_up())
-        .filter_map(|i| match i.ip() {
-            IpAddr::V4(v4) if v4.is_private() || v4.is_link_local() => Some(IpAddr::V4(v4)),
-            _ => None,
-        })
-        .collect();
-    out.sort();
-    out.dedup();
-    out
-}
+pub use super::ipfilter::listen_addresses as lan_addresses;
 
 /// Regla de desempate cuando hay dos conexiones con el mismo dispositivo:
 /// se conserva la iniciada por el dispositivo de id menor (ambos lados
@@ -335,9 +375,15 @@ fn reject_message(r: RejectReason) -> &'static str {
 }
 
 impl NetworkService {
-    pub fn new(identity: Identity, store: NetStore, events: Arc<dyn NetEvents>, alerts: Arc<dyn AlertHandler>, cfg: NetConfig) -> AppResult<Self> {
+    pub fn new(provider: Arc<dyn IdentityProvider>, store: NetStore, events: Arc<dyn NetEvents>, alerts: Arc<dyn AlertHandler>, cfg: NetConfig) -> AppResult<Self> {
         let settings = store.settings()?;
-        let device_id = identity.device_id();
+        // La identidad se CARGA; si hay un problema se informa y la red no arranca. Nunca se regenera aquí.
+        let (identity, identity_error) = match provider.load() {
+            Ok(i) => (Some(Arc::new(i)), None),
+            Err(e) => (None, Some(e)),
+        };
+        // La desconexión voluntaria persiste: se restaura al arrancar.
+        let paused: HashSet<String> = store.list_paired()?.into_iter().filter(|p| !p.auto_connect).map(|p| p.device_id).collect();
         let state = State {
             settings,
             running: None,
@@ -355,12 +401,14 @@ impl NetworkService {
             rate: RateLimiter::new(),
             dedup: DedupCache::new(256, Duration::from_secs(600)),
             pairing_requests: HashMap::new(),
-            paused: HashSet::new(),
+            paused,
+            remote_paused: HashSet::new(),
         };
         Ok(Self {
             inner: Arc::new(Inner {
-                identity,
-                device_id,
+                identity: Mutex::new(identity),
+                identity_error: Mutex::new(identity_error),
+                provider,
                 store,
                 events,
                 alerts,
@@ -390,8 +438,8 @@ impl NetworkService {
         self.inner.st().settings.clone()
     }
 
-    pub fn device_id(&self) -> &str {
-        &self.inner.device_id
+    pub fn device_id(&self) -> String {
+        self.inner.my_id()
     }
 
     pub fn listening_port(&self) -> Option<u16> {
@@ -400,9 +448,9 @@ impl NetworkService {
 
     // ------------------------------------------------------------ ciclo de vida
 
-    /// Arranca si la red está habilitada en los ajustes.
+    /// Arranca si la red está habilitada y la identidad está disponible.
     pub async fn start(&self) {
-        if self.inner.st().settings.enabled {
+        if self.inner.st().settings.enabled && self.inner.ident().is_some() {
             Inner::start_network(&self.inner).await;
         }
         self.inner.emit_all();
@@ -431,6 +479,61 @@ impl NetworkService {
         Ok(saved)
     }
 
+    /// Reintenta cargar la identidad (solo lectura). Si ahora es válida, arranca la red.
+    pub async fn retry_identity(&self) -> NetStatus {
+        let result = self.inner.provider.load();
+        // Con una identidad ya en uso nunca se reemplaza por una recarga (un llavero bloqueado ahora no debe
+        // tumbar una red que funciona).
+        if self.inner.ident().is_none() {
+            self.inner.set_identity(result);
+        }
+        if self.inner.ident().is_some() && self.inner.st().settings.enabled {
+            Inner::start_network(&self.inner).await;
+        }
+        self.inner.emit_all();
+        self.inner.status()
+    }
+
+    /// Recuperación explícita: identidad nueva. Se rechaza si la actual es válida o sin la confirmación exacta.
+    pub async fn reset_identity(&self, confirm: &str) -> Result<NetStatus, String> {
+        if confirm != RESET_CONFIRMATION {
+            return Err(format!("Para crear una identidad nueva escribí exactamente «{RESET_CONFIRMATION}»."));
+        }
+        match self.inner.identity_problem() {
+            None => return Err("La identidad actual es válida: no hace falta (ni conviene) crear otra.".into()),
+            // Un almacén inaccesible suele ser temporal: crear otra identidad sería destructivo e innecesario.
+            Some(IdentityError::StoreUnavailable(_) | IdentityError::Internal(_)) => {
+                return Err("El problema parece temporal (almacén de claves inaccesible). Reintentá antes de crear una identidad nueva.".into());
+            }
+            Some(_) => {}
+        }
+        self.inner.stop_network();
+        let result = self.inner.provider.reset();
+        let outcome = result.as_ref().map(|_| ()).map_err(|e| e.to_string());
+        self.inner.set_identity(result);
+        if outcome.is_ok() && self.inner.st().settings.enabled {
+            Inner::start_network(&self.inner).await;
+        }
+        self.inner.emit_all();
+        outcome.map(|()| self.inner.status())
+    }
+
+    /// Alias local de un dispositivo emparejado (`None` o vacío lo quita).
+    pub fn rename_device(&self, device_id: &str, alias: Option<&str>) -> Result<(), String> {
+        let clean = match alias.map(str::trim).filter(|a| !a.is_empty()) {
+            Some(a) => Some(sanitize_name(a).ok_or("El nombre no es válido.")?),
+            None => None,
+        };
+        match self.inner.store.set_alias(device_id, clean.as_deref()) {
+            Ok(true) => {
+                self.inner.emit_devices();
+                Ok(())
+            }
+            Ok(false) => Err("Ese dispositivo no está emparejado.".into()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     /// El nombre visible cambió: re-anunciar.
     pub fn refresh_announcement(&self) {
         self.inner.reannounce();
@@ -447,7 +550,7 @@ impl NetworkService {
     }
 
     pub fn disconnect(&self, device_id: &str) {
-        self.inner.close_device(device_id);
+        self.inner.user_disconnect(device_id);
         self.inner.emit_all();
     }
 
@@ -501,25 +604,57 @@ impl Inner {
         sanitize_name(&(self.cfg.name)()).unwrap_or_else(|| "Dispositivo".into())
     }
 
+    fn ident(&self) -> Option<Arc<Identity>> {
+        self.identity.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Id público de este equipo ("" si la identidad no está disponible).
+    fn my_id(&self) -> String {
+        self.ident().map(|i| i.device_id()).unwrap_or_default()
+    }
+
+    fn identity_problem(&self) -> Option<IdentityError> {
+        self.identity_error.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn set_identity(&self, result: Result<Identity, IdentityError>) {
+        match result {
+            Ok(i) => {
+                *self.identity.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(i));
+                *self.identity_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
+            Err(e) => {
+                *self.identity.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *self.identity_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
+            }
+        }
+    }
+
     fn status(&self) -> NetStatus {
+        let ident = self.ident();
+        let problem = self.identity_problem();
         let st = self.st();
         let running = st.running.is_some();
         NetStatus {
             enabled: st.settings.enabled,
+            identity: match &problem {
+                None => IdentityStatus { state: "ok", code: None, message: None, can_reset: false },
+                Some(e) => IdentityStatus { state: "error", code: Some(e.code()), message: Some(e.to_string()), can_reset: !matches!(e, IdentityError::StoreUnavailable(_) | IdentityError::Internal(_)) },
+            },
             state: if !st.settings.enabled {
                 "stopped"
-            } else if st.start_error.is_some() {
+            } else if st.start_error.is_some() || problem.is_some() {
                 "error"
             } else if running {
                 "running"
             } else {
                 "starting"
             },
-            error: st.start_error.clone(),
-            device_id: self.device_id.clone(),
+            error: problem.as_ref().map(|e| e.to_string()).or_else(|| st.start_error.clone()),
+            device_id: ident.as_ref().map(|i| i.device_id()).unwrap_or_default(),
             device_name: self.local_name(),
             os: self.cfg.os.to_string(),
-            fingerprint: format_fingerprint(self.identity.fingerprint()),
+            fingerprint: ident.as_ref().map(|i| format_fingerprint(i.fingerprint())).unwrap_or_default(),
             port: st.bound_port.unwrap_or(st.settings.port),
             addresses: st.addresses.iter().map(|a| a.to_string()).collect(),
             mdns: if !self.cfg.mdns || !running {
@@ -530,7 +665,7 @@ impl Inner {
                 "active"
             },
             mdns_error: st.mdns_error.clone(),
-            key_storage: self.identity.storage(),
+            key_storage: ident.as_ref().map(|i| i.storage()).unwrap_or(KeyStorage::File),
         }
     }
 
@@ -557,12 +692,14 @@ impl Inner {
                 let d = st.discovered.get(&id);
                 let live = st.conns.values().find(|c| c.hello.as_ref().is_some_and(|h| h.device_id == id));
                 let pairing_active = st.pairing.get(&id).is_some_and(|s| s.state == PairState::Active);
-                let name = p
+                // Nombre anunciado: el guardado (autenticado) si está emparejado; si no, lo que anuncia el equipo.
+                let announced = p
                     .map(|p| p.name.clone())
                     .or_else(|| live.and_then(|c| c.hello.as_ref().map(|h| h.name.clone())))
                     .or_else(|| d.map(|d| d.name.clone()))
-                    .or_else(|| st.pairing.get(&id).map(|s| s.name.clone()))
-                    .unwrap_or_else(|| "Dispositivo".into());
+                    .or_else(|| st.pairing.get(&id).map(|s| s.name.clone()));
+                let alias = p.and_then(|p| p.alias.clone());
+                let name = alias.clone().or_else(|| announced.clone()).unwrap_or_else(|| "Dispositivo".into());
                 let os = p
                     .map(|p| p.os.clone())
                     .or_else(|| live.and_then(|c| c.hello.as_ref().map(|h| h.os.clone())))
@@ -593,8 +730,11 @@ impl Inner {
                     discovered: d.is_some(),
                     last_seen_ms: live.map(|_| now_ms()).or_else(|| d.map(|d| d.last_seen_ms)).or_else(|| p.and_then(|p| p.last_seen_at)),
                     last_error: st.errors.get(&id).cloned(),
+                    auto_connect: p.map(|p| p.auto_connect).unwrap_or(true),
                     device_id: id,
                     name,
+                    announced_name: announced,
+                    alias,
                     os,
                     addresses,
                     port,
@@ -649,6 +789,9 @@ impl Inner {
     // -------------------------------------------------------- arranque / parada
 
     async fn start_network(this: &Arc<Self>) {
+        if this.ident().is_none() {
+            return; // sin identidad válida no se abre ningún puerto
+        }
         if this.st().running.is_some() {
             return;
         }
@@ -691,7 +834,7 @@ impl Inner {
     }
 
     fn announce(&self, ips: &[IpAddr], port: u16) -> Announce {
-        Announce { device_id: self.device_id.clone(), name: self.local_name(), os: self.cfg.os.to_string(), port, ips: ips.to_vec() }
+        Announce { device_id: self.my_id(), name: self.local_name(), os: self.cfg.os.to_string(), port, ips: ips.to_vec() }
     }
 
     fn stop_network(&self) {
@@ -821,20 +964,21 @@ impl Inner {
 
     async fn handle_inbound(self: Arc<Self>, stream: TcpStream, addr: SocketAddr, cancel: CancellationToken) {
         let _ = stream.set_nodelay(true);
-        let Ok(server_cfg) = tls::server_config(&self.identity) else { return };
+        let Some(ident) = self.ident() else { return };
+        let Ok(server_cfg) = tls::server_config(&ident) else { return };
         let acceptor = TlsAcceptor::from(server_cfg);
         let handshake = async {
             let tls = acceptor.accept(stream).await.map_err(|e| e.to_string())?;
             let (_, conn) = tls.get_ref();
             let peer = tls::peer_fingerprint(conn.peer_certificates().map(|c| c.to_vec()).as_deref()).ok_or("sin certificado")?;
-            let sas = tls::pairing_code(conn, &peer, self.identity.fingerprint()).map_err(|e| e.to_string())?;
+            let sas = tls::pairing_code(conn, &peer, ident.fingerprint()).map_err(|e| e.to_string())?;
             let ws = tokio_tungstenite::accept_async_with_config(tls, Some(Self::ws_config())).await.map_err(|e| e.to_string())?;
             Ok::<_, String>((ws, peer, sas))
         };
         let Ok(Ok((ws, peer, sas))) = tokio::time::timeout(self.cfg.timings.hello_timeout, handshake).await else { return };
         let conn_id = self.next_conn.fetch_add(1, Ordering::Relaxed);
-        let rx = self.register_conn(conn_id, peer, addr, false, sas, cancel.clone());
-        self.run_session(ws, SessionMeta { conn_id, cancel, ready: None, rx }).await;
+        let (rx, voluntary) = self.register_conn(conn_id, peer, addr, false, sas, cancel.clone());
+        self.run_session(ws, SessionMeta { voluntary, conn_id, cancel, ready: None, rx }).await;
     }
 
     /// Conecta a `addr` y espera a que el otro extremo envíe su HELLO válido.
@@ -845,7 +989,8 @@ impl Inner {
             .map_err(|_| "timeout".to_string())?
             .map_err(|e| e.to_string())?;
         let _ = tcp.set_nodelay(true);
-        let cfg = tls::client_config(&self.identity, pin).map_err(|e| e.to_string())?;
+        let ident = self.ident().ok_or_else(|| "La identidad de este equipo no está disponible.".to_string())?;
+        let cfg = tls::client_config(&ident, pin).map_err(|e| e.to_string())?;
         let connector = TlsConnector::from(cfg);
         let name = rustls::pki_types::ServerName::try_from(SERVER_NAME).map_err(|e| e.to_string())?;
         let tls = tokio::time::timeout(t.connect_timeout, connector.connect(name, tcp))
@@ -854,7 +999,7 @@ impl Inner {
             .map_err(|e| format!("tls: {e}"))?;
         let (_, conn) = tls.get_ref();
         let peer = tls::peer_fingerprint(conn.peer_certificates().map(|c| c.to_vec()).as_deref()).ok_or("sin certificado")?;
-        let sas = tls::pairing_code(conn, self.identity.fingerprint(), &peer).map_err(|e| e.to_string())?;
+        let sas = tls::pairing_code(conn, ident.fingerprint(), &peer).map_err(|e| e.to_string())?;
         let (ws, _) = tokio::time::timeout(
             t.connect_timeout,
             tokio_tungstenite::client_async_with_config("wss://damebola.local/", tls, Some(Self::ws_config())),
@@ -864,23 +1009,24 @@ impl Inner {
         .map_err(|e| format!("ws: {e}"))?;
 
         let conn_id = self.next_conn.fetch_add(1, Ordering::Relaxed);
-        let rx = self.register_conn(conn_id, peer, addr, true, sas, cancel.clone());
+        let (rx, voluntary) = self.register_conn(conn_id, peer, addr, true, sas, cancel.clone());
         let (ready_tx, ready_rx) = oneshot::channel();
         let this = self.clone();
-        tokio::spawn(async move { this.run_session(ws, SessionMeta { conn_id, cancel, ready: Some(ready_tx), rx }).await });
+        tokio::spawn(async move { this.run_session(ws, SessionMeta { voluntary, conn_id, cancel, ready: Some(ready_tx), rx }).await });
         match tokio::time::timeout(t.hello_timeout, ready_rx).await {
             Ok(Ok(r)) => r,
             _ => Err("timeout".into()),
         }
     }
 
-    fn register_conn(&self, conn_id: u64, fp: Fingerprint, addr: SocketAddr, initiator_local: bool, sas: String, cancel: CancellationToken) -> mpsc::Receiver<Message> {
+    fn register_conn(&self, conn_id: u64, fp: Fingerprint, addr: SocketAddr, initiator_local: bool, sas: String, cancel: CancellationToken) -> (mpsc::Receiver<Message>, Arc<AtomicBool>) {
         let (tx, rx) = mpsc::channel(32);
+        let voluntary = Arc::new(AtomicBool::new(false));
         self.st().conns.insert(
             conn_id,
-            Conn { fp, addr, initiator_local, tx, cancel, hello: None, sas, strikes: 0 },
+            Conn { voluntary: voluntary.clone(), fp, addr, initiator_local, tx, cancel, hello: None, sas, strikes: 0 },
         );
-        rx
+        (rx, voluntary)
     }
 
     // ------------------------------------------------------------- sesión
@@ -889,11 +1035,11 @@ impl Inner {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let SessionMeta { conn_id, cancel, ready, mut rx } = meta;
+        let SessionMeta { voluntary, conn_id, cancel, ready, mut rx } = meta;
         let t = self.cfg.timings.clone();
         let mut ctx = SessionCtx { hello_done: false, ready };
         let hello = Message::new(Body::Hello(Hello {
-            device_id: self.device_id.clone(),
+            device_id: self.my_id(),
             name: self.local_name(),
             os: self.cfg.os.to_string(),
             app_version: self.cfg.app_version.clone(),
@@ -934,6 +1080,11 @@ impl Inner {
                         }
                     }
                     Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => last_rx = Instant::now(),
+                    Some(Ok(WsMessage::Close(frame))) => {
+                        // 4001: el otro equipo cortó a propósito (el usuario pulsó Desconectar).
+                        if frame.is_some_and(|f| u16::from(f.code) == USER_DISCONNECT_CODE) { self.on_remote_voluntary(conn_id); }
+                        break;
+                    }
                     _ => break,
                 },
             }
@@ -944,7 +1095,8 @@ impl Inner {
                 break;
             }
         }
-        let _ = tokio::time::timeout(Duration::from_secs(1), ws.close(None)).await;
+        let close_frame = voluntary.load(Ordering::SeqCst).then(|| CloseFrame { code: CloseCode::from(USER_DISCONNECT_CODE), reason: "user-disconnect".into() });
+        let _ = tokio::time::timeout(Duration::from_secs(1), ws.close(close_frame)).await;
         // Cierre ordenado: se leen los datos pendientes hasta que el otro extremo cierre.
         // Cerrar un socket con datos sin leer provoca un RST (sobre todo en Windows) y el
         // otro lado podría perder el último mensaje (PAIR_REJECT/UNPAIR).
@@ -1003,7 +1155,7 @@ impl Inner {
                 if ctx.hello_done || h.device_id != device_id_from_fingerprint(&fp) {
                     return Flow::Close; // el id declarado debe coincidir con el certificado
                 }
-                if h.device_id == self.device_id {
+                if h.device_id == self.my_id() {
                     if let Some(r) = ctx.ready.take() {
                         let _ = r.send(Err("Ese es este mismo equipo.".into()));
                     }
@@ -1058,10 +1210,15 @@ impl Inner {
                 .map(|(id, _)| *id)
                 .collect();
             let mut keep_new = true;
+            // Desconectado a propósito por el usuario (o carrera con un intento en curso): no se acepta.
+            let rejected_by_user = st.paused.contains(&h.device_id);
+            if rejected_by_user {
+                keep_new = false;
+            }
             for old_id in duplicates {
                 let pairing_on_old = st.pairing.get(&h.device_id).is_some_and(|p| p.conn_id == old_id && p.state == PairState::Active);
                 let old_init = st.conns.get(&old_id).map(|c| c.initiator_local).unwrap_or(false);
-                if pairing_on_old || !new_connection_wins(&self.device_id, &h.device_id, initiator_local, old_init) {
+                if pairing_on_old || !new_connection_wins(&self.my_id(), &h.device_id, initiator_local, old_init) {
                     keep_new = false;
                 } else if let Some(old) = st.conns.remove(&old_id) {
                     losers.push(old.cancel);
@@ -1073,7 +1230,11 @@ impl Inner {
                 }
                 st.errors.remove(&h.device_id);
                 st.backoff.remove(&h.device_id);
+                st.remote_paused.remove(&h.device_id); // el otro equipo volvió a conectarse: se acabó su pausa
             } else if let Some(c) = st.conns.remove(&conn_id) {
+                if rejected_by_user {
+                    c.voluntary.store(true, Ordering::SeqCst); // el otro equipo recibe el cierre 4001
+                }
                 losers.push(c.cancel);
             }
             keep_new
@@ -1197,6 +1358,8 @@ impl Inner {
             let d = PairedDevice {
                 device_id: device_id.to_string(),
                 name: p.name.clone(),
+                alias: None,
+                auto_connect: true,
                 os: p.os.clone(),
                 fingerprint: hex(&p.fp),
                 last_address: p.initiator.then(|| p.addr.ip().to_string()),
@@ -1376,7 +1539,7 @@ impl Inner {
         // Aceptada: avisa y ejecuta el sistema de alertas de la Fase 1.
         self.send_body(conn_id, Body::AlertAck(AlertAck { reply_to: msg_id, stage: AckStage::Accepted }));
         let handler = self.alerts.clone();
-        let sender = peer.name.clone();
+        let sender = peer.display_name().to_string();
         let outcome = tokio::task::spawn_blocking(move || handler.show(&sender)).await;
         let body = match outcome {
             Ok(Ok(())) => {
@@ -1425,7 +1588,7 @@ impl Inner {
                 "offline",
                 false,
                 None,
-                format!("{} no está conectado. No se guardan alertas para después: probá de nuevo cuando se reconecte.", paired.name),
+                format!("{} no está conectado. No se guardan alertas para después: probá de nuevo cuando se reconecte.", paired.display_name()),
             );
         };
         let msg = Message::new(Body::AlertRequest(Empty {}));
@@ -1441,7 +1604,7 @@ impl Inner {
                 Ok(Some(Body::AlertAck(a))) => match a.stage {
                     AckStage::Accepted => accepted = true,
                     AckStage::Shown => {
-                        break AlertSendResult::fail("shown", true, None, format!("La alerta se mostró en {}.", paired.name));
+                        break AlertSendResult::fail("shown", true, None, format!("La alerta se mostró en {}.", paired.display_name()));
                     }
                 },
                 Ok(Some(Body::AlertReject(r))) => {
@@ -1487,6 +1650,9 @@ impl Inner {
             let cancel = r.cancel.child_token();
             if user {
                 st.paused.remove(device_id);
+                st.remote_paused.remove(device_id);
+            } else if st.paused.contains(device_id) || st.remote_paused.contains(device_id) {
+                return Ok(()); // conexión automática bloqueada por una desconexión voluntaria
             }
             if st.connecting.contains(device_id) || st.conns.values().any(|c| c.hello.as_ref().is_some_and(|h| h.device_id == device_id)) {
                 return Ok(());
@@ -1494,20 +1660,26 @@ impl Inner {
             st.connecting.insert(device_id.to_string());
             cancel
         };
+        if user && this.store.get_paired(device_id).ok().flatten().is_some() {
+            let _ = this.store.set_auto_connect(device_id, true);
+        }
         this.emit_devices();
 
         let paired = this.store.get_paired(device_id).ok().flatten();
+        // Mismo criterio de direcciones que el descubrimiento y la conexión manual (ver `ipfilter`).
+        let nets = ipfilter::local_nets();
+        let policy = AddrPolicy { allow_loopback: this.cfg.allow_loopback };
         let mut candidates: Vec<SocketAddr> = vec![];
         {
             let st = this.st();
             if let Some(d) = st.discovered.get(device_id) {
-                candidates.extend(d.addrs.iter().map(|a| SocketAddr::new(*a, d.port)));
+                candidates.extend(d.addrs.iter().filter(|a| policy.check(**a, Origin::Discovery, &nets).is_ok()).map(|a| SocketAddr::new(*a, d.port)));
             }
         }
         if let Some(p) = &paired {
             if let (Some(a), Some(port)) = (p.last_address.as_ref().and_then(|a| a.parse::<IpAddr>().ok()), p.last_port) {
                 let sa = SocketAddr::new(a, port);
-                if !candidates.contains(&sa) {
+                if !candidates.contains(&sa) && policy.check(a, Origin::Stored, &nets).is_ok() {
                     candidates.push(sa);
                 }
             }
@@ -1550,15 +1722,36 @@ impl Inner {
         result
     }
 
-    /// Corta las conexiones con un dispositivo y evita reconectar solo.
-    fn close_device(&self, device_id: &str) {
+    /// Un par emparejado nos cortó a propósito: no se le reconecta solo hasta que él vuelva o el usuario pulse Conectar.
+    fn on_remote_voluntary(&self, conn_id: u64) {
+        let Some((fp, device_id)) = self.st().conns.get(&conn_id).and_then(|c| c.hello.as_ref().map(|h| (c.fp, h.device_id.clone()))) else { return };
+        if self.authorize(&fp).is_some() {
+            self.st().remote_paused.insert(device_id);
+            self.emit_devices();
+        }
+    }
+
+    /// Corta las conexiones con un dispositivo (sin cambiar su estado de reconexión).
+    fn drop_connections(&self, device_id: &str, voluntary: bool) {
         let mut st = self.st();
-        st.paused.insert(device_id.to_string());
         let ids: Vec<u64> = st.conns.iter().filter(|(_, c)| c.hello.as_ref().is_some_and(|h| h.device_id == device_id)).map(|(id, _)| *id).collect();
         for id in ids {
             if let Some(c) = st.conns.remove(&id) {
+                c.voluntary.store(voluntary, Ordering::SeqCst);
                 c.cancel.cancel();
             }
+        }
+    }
+
+    /// El usuario pulsó «Desconectar»: se corta, se persiste la intención y no se reconecta solo
+    /// (ni por mDNS, ni por cambio de IP, ni por reinicio) hasta que pulse «Conectar».
+    fn user_disconnect(&self, device_id: &str) {
+        if self.store.get_paired(device_id).ok().flatten().is_some() {
+            let _ = self.store.set_auto_connect(device_id, false);
+            self.st().paused.insert(device_id.to_string());
+            self.drop_connections(device_id, true);
+        } else {
+            self.drop_connections(device_id, false);
         }
     }
 
@@ -1575,6 +1768,7 @@ impl Inner {
             st.errors.remove(device_id);
             st.backoff.remove(device_id);
             st.paused.remove(device_id);
+            st.remote_paused.remove(device_id);
             if let Some(conn_id) = conn {
                 if let Some(c) = st.conns.get(&conn_id) {
                     c.cancel.cancel();
@@ -1587,8 +1781,9 @@ impl Inner {
 
     async fn add_manual(this: &Arc<Self>, host: &str, port: u16) -> Result<DeviceView, String> {
         let ip: IpAddr = host.trim().parse().map_err(|_| "Ingresá una dirección IP válida (por ejemplo 192.168.1.20).".to_string())?;
-        if !is_lan_ip(&ip) {
-            return Err("Solo se admiten direcciones de la red local (privadas o locales), no de Internet.".into());
+        let policy = AddrPolicy { allow_loopback: this.cfg.allow_loopback };
+        if let Err(reject) = policy.check(ip, Origin::Manual, &ipfilter::local_nets()) {
+            return Err(reject.message());
         }
         if port == 0 {
             return Err("El puerto debe estar entre 1 y 65535.".into());
@@ -1624,8 +1819,7 @@ impl Inner {
         this.st().discovered.insert(device_id.clone(), Discovered { name, os, addrs: vec![ip], port, last_seen_ms: now_ms() });
         if !paired {
             // Solo era una sonda: no se deja una conexión sin autoridad abierta.
-            this.close_device(&device_id);
-            this.st().paused.remove(&device_id);
+            this.drop_connections(&device_id, false);
         }
         this.emit_devices();
         this.devices().into_iter().find(|d| d.device_id == device_id).ok_or_else(|| "El dispositivo no está disponible.".to_string())
@@ -1650,21 +1844,34 @@ impl Inner {
     }
 
     fn on_found(&self, f: Found) {
-        if f.device_id == self.device_id {
+        if f.device_id == self.my_id() {
             return; // este mismo equipo
         }
-        let first_addr = f.addrs.first().map(|a| (a.to_string(), f.port));
+        // Un anuncio mDNS no está autenticado: solo se aceptan direcciones privadas/link-local que estén
+        // en el MISMO enlace que una de nuestras interfaces (ver `ipfilter`).
+        let nets = ipfilter::local_nets();
+        let policy = AddrPolicy { allow_loopback: self.cfg.allow_loopback };
+        let addrs: Vec<IpAddr> = f.addrs.iter().copied().filter(|a| policy.check(*a, Origin::Discovery, &nets).is_ok()).collect();
+        if addrs.is_empty() {
+            if self.st().discovered.remove(&f.device_id).is_some() {
+                self.emit_devices();
+            }
+            return;
+        }
+        let first = addrs.first().map(|a| (a.to_string(), f.port));
         {
             let mut st = self.st();
-            st.discovered.insert(
-                f.device_id.clone(),
-                Discovered { name: f.name.clone(), os: f.os.clone(), addrs: f.addrs, port: f.port, last_seen_ms: now_ms() },
-            );
-            // Apareció (o cambió de IP): reintentar de inmediato.
+            // Una sola entrada por device_id (sin duplicados). El nombre anunciado solo vive aquí (memoria):
+            // NUNCA se escribe en el registro guardado ni pisa el alias.
+            st.discovered.insert(f.device_id.clone(), Discovered { name: f.name.clone(), os: f.os.clone(), addrs, port: f.port, last_seen_ms: now_ms() });
+            // Apareció (o cambió de IP): se permite reintentar de inmediato (salvo desconexión voluntaria,
+            // que `reconnect_pass` y `connect_device` respetan).
             st.backoff.remove(&f.device_id);
         }
-        if self.store.get_paired(&f.device_id).ok().flatten().is_some() {
-            let _ = self.store.touch_paired(&f.device_id, &f.name, &f.os, first_addr);
+        if let Some((addr, port)) = first {
+            if self.store.get_paired(&f.device_id).ok().flatten().is_some() {
+                let _ = self.store.touch_address(&f.device_id, &addr, port);
+            }
         }
         self.emit_devices();
     }
@@ -1786,6 +1993,7 @@ impl Inner {
                 .iter()
                 .filter(|p| {
                     !st.paused.contains(&p.device_id)
+                        && !st.remote_paused.contains(&p.device_id)
                         && !st.connecting.contains(&p.device_id)
                         && !st.conns.values().any(|c| c.hello.as_ref().is_some_and(|h| h.device_id == p.device_id))
                         && st.backoff.get(&p.device_id).is_none_or(|b| b.next_at <= now)
@@ -1814,14 +2022,6 @@ fn hex_to_fp(s: &str) -> Option<Fingerprint> {
     Some(out)
 }
 
-/// Solo direcciones de red local: nunca se conecta hacia Internet.
-fn is_lan_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_loopback(),
-        IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80,
-    }
-}
-
 #[cfg(test)]
 impl NetworkService {
     /// Abre una conexión de prueba hacia 127.0.0.1:`port` y devuelve el id remoto.
@@ -1842,8 +2042,19 @@ impl NetworkService {
         }
     }
 
+    /// Simula un anuncio mDNS (sin red).
+    pub fn test_found(&self, device_id: &str, name: &str, addrs: &[&str], port: u16) {
+        self.inner.on_found(Found {
+            device_id: device_id.to_string(),
+            name: name.to_string(),
+            os: "windows".into(),
+            addrs: addrs.iter().map(|a| a.parse().unwrap()).collect(),
+            port,
+        });
+    }
+
     pub fn fingerprint(&self) -> Fingerprint {
-        *self.inner.identity.fingerprint()
+        *self.inner.ident().expect("identidad disponible en pruebas").fingerprint()
     }
 }
 
@@ -1883,16 +2094,6 @@ mod unit_tests {
         assert!(d1 >= Duration::from_secs(4) && d1 <= Duration::from_secs(5));
         assert!(d3 >= Duration::from_secs(16));
         assert!(d20 >= max && d20 <= max.mul_f64(1.25));
-    }
-
-    #[test]
-    fn manual_addresses_must_be_local() {
-        assert!(is_lan_ip(&"192.168.1.5".parse().unwrap()));
-        assert!(is_lan_ip(&"10.1.2.3".parse().unwrap()));
-        assert!(is_lan_ip(&"169.254.1.1".parse().unwrap()));
-        assert!(is_lan_ip(&"fd00::1".parse().unwrap()));
-        assert!(!is_lan_ip(&"8.8.8.8".parse().unwrap()));
-        assert!(!is_lan_ip(&"2001:4860:4860::8888".parse().unwrap()));
     }
 
     #[test]

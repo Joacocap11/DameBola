@@ -81,19 +81,129 @@ impl AlertManager {
     pub fn context(&self) -> Option<AlertContext> {
         self.lock().context.clone()
     }
-}
 
-pub fn start(app: &AppHandle, services: &Arc<Services>, request: AlertRequest) -> AppResult<AlertStarted> {
-    let manager = &services.alerts;
-    let (generation, last_song_id) = {
-        let mut inner = manager.lock();
+    /// Reserva el turno de alerta (una sola a la vez). Devuelve (generación, última canción).
+    fn begin(&self) -> AppResult<(u64, Option<String>)> {
+        let mut inner = self.lock();
         if inner.active {
             return Err(AppError::Alert(ALREADY_ACTIVE_MSG.into()));
         }
         inner.active = true;
         inner.generation += 1;
-        (inner.generation, inner.last_song_id.clone())
-    };
+        Ok((inner.generation, inner.last_song_id.clone()))
+    }
+
+    /// Libera el turno. Con `expected_generation` solo actúa si coincide con la alerta en curso.
+    /// Devuelve `false` si no había nada que terminar (idempotente).
+    fn finish(&self, expected_generation: Option<u64>) -> bool {
+        let mut inner = self.lock();
+        if !inner.active || expected_generation.is_some_and(|g| g != inner.generation) {
+            return false;
+        }
+        inner.active = false;
+        inner.context = None;
+        inner.generation += 1;
+        true
+    }
+}
+
+// ------------------------------------------------------------------------------------------
+// Apertura de ventanas
+//
+// Significado exacto de «mostrada» (lo que confirma `ALERT_ACK stage=shown` al emisor):
+// **todas** las ventanas de alerta (una por monitor) se crearon, se posicionaron y se pidió
+// mostrarlas sin error del sistema. Si CUALQUIERA falla, la alerta se cancela por completo: se destruyen
+// las que ya se habían abierto (sin ventanas huérfanas), no suena audio y el resultado es un error de
+// visualización. NO garantiza que una persona la haya visto (pantalla apagada, usuario ausente, otra
+// aplicación a pantalla completa...). El foco de la primera ventana es «mejor esfuerzo».
+// ------------------------------------------------------------------------------------------
+
+/// Una ventana de alerta ya creada.
+pub trait WindowHandle {
+    fn show(&self) -> Result<(), String>;
+    /// Mejor esfuerzo: un fallo de foco no cancela la alerta (los botones siguen funcionando).
+    fn focus(&self);
+    fn destroy(&self);
+}
+
+/// Origen de ventanas (Tauri en producción; simulado en las pruebas).
+pub trait Surface {
+    type Handle: WindowHandle;
+    fn monitor_count(&self) -> Result<usize, String>;
+    fn open(&self, index: usize) -> Result<Self::Handle, String>;
+}
+
+/// Abre una ventana por monitor con la política «todo o nada». Ver el comentario de arriba.
+fn open_all<S: Surface>(surface: &S) -> AppResult<Vec<S::Handle>> {
+    let count = surface.monitor_count().map_err(|e| AppError::Alert(format!("No se pudieron listar los monitores: {e}")))?;
+    if count == 0 {
+        return Err(AppError::Alert("No se detectó ningún monitor.".into()));
+    }
+    let destroy_all = |windows: &[S::Handle]| windows.iter().for_each(WindowHandle::destroy);
+    let mut windows: Vec<S::Handle> = Vec::with_capacity(count);
+    for index in 0..count {
+        match surface.open(index) {
+            Ok(w) => windows.push(w),
+            Err(e) => {
+                destroy_all(&windows);
+                return Err(AppError::Alert(format!("No se pudo abrir la ventana de alerta del monitor {}: {e}", index + 1)));
+            }
+        }
+    }
+    for (index, w) in windows.iter().enumerate() {
+        if let Err(e) = w.show() {
+            destroy_all(&windows);
+            return Err(AppError::Alert(format!("No se pudo mostrar la ventana de alerta del monitor {}: {e}", index + 1)));
+        }
+    }
+    if let Some(first) = windows.first() {
+        first.focus(); // para que Escape funcione
+    }
+    Ok(windows)
+}
+
+struct TauriSurface {
+    app: AppHandle,
+    monitors: Vec<Monitor>,
+}
+
+impl TauriSurface {
+    fn new(app: &AppHandle) -> AppResult<Self> {
+        let mut monitors = app
+            .available_monitors()
+            .map_err(|e| AppError::Alert(format!("No se pudieron listar los monitores: {e}")))?;
+        if monitors.is_empty() {
+            monitors.extend(app.primary_monitor().ok().flatten());
+        }
+        Ok(Self { app: app.clone(), monitors })
+    }
+}
+
+impl WindowHandle for WebviewWindow {
+    fn show(&self) -> Result<(), String> {
+        WebviewWindow::show(self).map_err(|e| e.to_string())
+    }
+    fn focus(&self) {
+        let _ = self.set_focus();
+    }
+    fn destroy(&self) {
+        let _ = WebviewWindow::destroy(self);
+    }
+}
+
+impl Surface for TauriSurface {
+    type Handle = WebviewWindow;
+    fn monitor_count(&self) -> Result<usize, String> {
+        Ok(self.monitors.len())
+    }
+    fn open(&self, index: usize) -> Result<WebviewWindow, String> {
+        let monitor = self.monitors.get(index).ok_or("monitor inexistente")?;
+        build_window(&self.app, index, monitor).map_err(|e| e.to_string())
+    }
+}
+
+pub fn start(app: &AppHandle, services: &Arc<Services>, request: AlertRequest) -> AppResult<AlertStarted> {
+    let (generation, last_song_id) = services.alerts.begin()?;
 
     match start_inner(app, services, request, generation, last_song_id) {
         Ok(started) => Ok(started),
@@ -143,7 +253,9 @@ fn start_inner(
         }
     }
 
-    let monitors = create_windows(app)?;
+    // Todo o nada: si falla una ventana no hay audio ni alerta (ver `open_all`).
+    let windows = open_all(&TauriSurface::new(app)?)?;
+    let monitors = windows.len();
 
     if let Some(song) = &song {
         let played = services
@@ -165,14 +277,8 @@ fn start_inner(
 /// coincide con la alerta en curso (evita que un temporizador viejo cierre
 /// una alerta nueva).
 pub fn end(app: &AppHandle, services: &Arc<Services>, expected_generation: Option<u64>) {
-    {
-        let mut inner = services.alerts.lock();
-        if !inner.active || expected_generation.is_some_and(|g| g != inner.generation) {
-            return;
-        }
-        inner.active = false;
-        inner.context = None;
-        inner.generation += 1;
+    if !services.alerts.finish(expected_generation) {
+        return;
     }
     // Lock liberado: destruir ventanas dispara eventos que reentran en `end`.
     for (label, window) in app.webview_windows() {
@@ -198,41 +304,6 @@ fn spawn_timer(app: AppHandle, services: Arc<Services>, generation: u64, duratio
         }
         end(&app, &services, Some(generation));
     });
-}
-
-/// Crea una ventana por monitor. Devuelve cuántas se crearon.
-fn create_windows(app: &AppHandle) -> AppResult<usize> {
-    let mut monitors = app
-        .available_monitors()
-        .map_err(|e| AppError::Alert(format!("No se pudieron listar los monitores: {e}")))?;
-    if monitors.is_empty() {
-        monitors.extend(app.primary_monitor().ok().flatten());
-    }
-    if monitors.is_empty() {
-        return Err(AppError::Alert("No se detectó ningún monitor.".into()));
-    }
-
-    let mut windows: Vec<WebviewWindow> = Vec::with_capacity(monitors.len());
-    for (i, monitor) in monitors.iter().enumerate() {
-        match build_window(app, i, monitor) {
-            Ok(w) => windows.push(w),
-            Err(e) => {
-                for w in &windows {
-                    let _ = w.destroy();
-                }
-                return Err(e);
-            }
-        }
-    }
-
-    for w in &windows {
-        let _ = w.show();
-    }
-    if let Some(first) = windows.first() {
-        // La primera ventana toma el foco para que Escape funcione.
-        let _ = first.set_focus();
-    }
-    Ok(windows.len())
 }
 
 fn build_window(app: &AppHandle, index: usize, monitor: &Monitor) -> AppResult<WebviewWindow> {
@@ -278,4 +349,156 @@ fn place_on_monitor(window: &WebviewWindow, monitor: &Monitor) -> AppResult<()> 
         window.set_position(*pos).map_err(err)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::BTreeSet;
+    use std::rc::Rc;
+
+    #[derive(Default, Debug)]
+    struct World {
+        alive: BTreeSet<usize>,
+        opened_ever: Vec<usize>,
+        destroyed: Vec<usize>,
+        shown: Vec<usize>,
+        focused: Vec<usize>,
+    }
+
+    struct Fake {
+        monitors: Result<usize, String>,
+        fail_open: Option<usize>,
+        fail_show: Option<usize>,
+        world: Rc<RefCell<World>>,
+    }
+
+    #[derive(Debug)]
+    struct FakeWindow {
+        index: usize,
+        fail_show: bool,
+        world: Rc<RefCell<World>>,
+    }
+
+    impl WindowHandle for FakeWindow {
+        fn show(&self) -> Result<(), String> {
+            if self.fail_show {
+                return Err("show falló".into());
+            }
+            self.world.borrow_mut().shown.push(self.index);
+            Ok(())
+        }
+        fn focus(&self) {
+            self.world.borrow_mut().focused.push(self.index);
+        }
+        fn destroy(&self) {
+            let mut w = self.world.borrow_mut();
+            w.alive.remove(&self.index);
+            w.destroyed.push(self.index);
+        }
+    }
+
+    impl Surface for Fake {
+        type Handle = FakeWindow;
+        fn monitor_count(&self) -> Result<usize, String> {
+            self.monitors.clone()
+        }
+        fn open(&self, index: usize) -> Result<FakeWindow, String> {
+            if self.fail_open == Some(index) {
+                return Err("build falló".into());
+            }
+            let mut w = self.world.borrow_mut();
+            w.alive.insert(index);
+            w.opened_ever.push(index);
+            Ok(FakeWindow { index, fail_show: self.fail_show == Some(index), world: self.world.clone() })
+        }
+    }
+
+    fn fake(monitors: usize, fail_open: Option<usize>, fail_show: Option<usize>) -> (Fake, Rc<RefCell<World>>) {
+        let world = Rc::new(RefCell::new(World::default()));
+        (Fake { monitors: Ok(monitors), fail_open, fail_show, world: world.clone() }, world)
+    }
+
+    #[test]
+    fn every_monitor_gets_a_shown_window_and_the_first_one_takes_focus() {
+        let (surface, world) = fake(3, None, None);
+        let windows = open_all(&surface).unwrap();
+        assert_eq!(windows.len(), 3);
+        let w = world.borrow();
+        assert_eq!(w.shown, vec![0, 1, 2]);
+        assert_eq!(w.focused, vec![0]);
+        assert!(w.destroyed.is_empty());
+        assert_eq!(w.alive.len(), 3);
+    }
+
+    #[test]
+    fn a_failure_on_the_first_window_fails_the_alert_and_leaves_nothing_open() {
+        let (surface, world) = fake(3, Some(0), None);
+        let err = open_all(&surface).unwrap_err().to_string();
+        assert!(err.contains("monitor 1"), "{err}");
+        let w = world.borrow();
+        assert!(w.alive.is_empty() && w.opened_ever.is_empty() && w.shown.is_empty());
+    }
+
+    #[test]
+    fn a_failure_on_a_secondary_window_destroys_the_ones_already_opened() {
+        let (surface, world) = fake(3, Some(2), None);
+        let err = open_all(&surface).unwrap_err().to_string();
+        assert!(err.contains("monitor 3"), "{err}");
+        let w = world.borrow();
+        assert_eq!(w.opened_ever, vec![0, 1]);
+        assert!(w.alive.is_empty(), "sin ventanas huérfanas: {:?}", w.alive);
+        assert!(w.shown.is_empty(), "no se muestra nada si la alerta no puede completarse");
+    }
+
+    #[test]
+    fn a_show_failure_after_opening_everything_also_tears_everything_down() {
+        for failing in [0, 1, 2] {
+            let (surface, world) = fake(3, None, Some(failing));
+            let err = open_all(&surface).unwrap_err().to_string();
+            assert!(err.contains(&format!("monitor {}", failing + 1)), "{err}");
+            assert!(world.borrow().alive.is_empty(), "show falla en {failing}");
+            assert!(world.borrow().focused.is_empty(), "no se enfoca una alerta cancelada");
+        }
+    }
+
+    #[test]
+    fn no_monitors_or_a_listing_error_is_an_error_not_a_silent_success() {
+        let (mut surface, world) = fake(0, None, None);
+        assert!(open_all(&surface).is_err());
+        surface.monitors = Err("sin pantalla".into());
+        assert!(open_all(&surface).unwrap_err().to_string().contains("monitores"));
+        assert!(world.borrow().alive.is_empty());
+    }
+
+    #[test]
+    fn a_single_monitor_works() {
+        let (surface, _) = fake(1, None, None);
+        assert_eq!(open_all(&surface).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn only_one_alert_at_a_time_and_a_failed_attempt_releases_the_turn() {
+        let m = AlertManager::default();
+        let (gen1, _) = m.begin().unwrap();
+        assert!(matches!(m.begin(), Err(AppError::Alert(msg)) if msg == ALREADY_ACTIVE_MSG), "no se acumulan alertas");
+        // La apertura de ventanas falló: se termina la alerta y el turno queda libre.
+        assert!(m.finish(Some(gen1)));
+        assert!(!m.is_active());
+        assert!(!m.finish(Some(gen1)), "terminar es idempotente");
+        assert!(m.begin().is_ok(), "la siguiente alerta puede empezar");
+    }
+
+    #[test]
+    fn a_stale_timer_cannot_end_a_newer_alert() {
+        let m = AlertManager::default();
+        let (old, _) = m.begin().unwrap();
+        assert!(m.finish(None));
+        let (new, _) = m.begin().unwrap();
+        assert_ne!(old, new);
+        assert!(!m.finish(Some(old)), "el temporizador viejo no cierra la alerta nueva");
+        assert!(m.is_active());
+        assert!(m.finish(Some(new)));
+    }
 }

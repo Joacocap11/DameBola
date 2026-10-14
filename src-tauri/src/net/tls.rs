@@ -162,13 +162,13 @@ pub fn pairing_code<D>(conn: &ConnectionCommon<D>, initiator: &Fingerprint, resp
 mod tests {
     use super::*;
     use crate::db::Database;
-    use crate::net::identity::{load_or_create, MemoryStore};
+    use crate::net::identity::{load_or_create, memory_backends};
     use crate::net::store::NetStore;
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
     use tokio_rustls::{TlsAcceptor, TlsConnector};
 
     fn ident() -> Identity {
-        load_or_create(&NetStore::new(Arc::new(Database::open_in_memory().unwrap())), &MemoryStore::default()).unwrap()
+        load_or_create(&NetStore::new(Arc::new(Database::open_in_memory().unwrap())), &memory_backends()).unwrap()
     }
 
     #[derive(Debug)]

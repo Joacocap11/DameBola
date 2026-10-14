@@ -3,6 +3,7 @@ mod audio;
 mod commands;
 mod db;
 mod error;
+mod instance;
 mod net;
 mod selection;
 mod settings;
@@ -20,7 +21,7 @@ use crate::db::Database;
 use crate::error::AppError;
 use crate::net::identity;
 use crate::net::service::{
-    current_os, AlertHandler, DeviceView, NetConfig, NetEvents, NetStatus, NetTimings, NetworkService, PairingView, RemoteAlertError,
+    current_os, AlertHandler, DeviceView, NetConfig, NetEvents, NetStatus, NetTimings, NetworkService, PairingView, RemoteAlertError, StoreIdentityProvider,
 };
 use crate::net::store::NetStore;
 use crate::settings::SettingsStore;
@@ -72,8 +73,15 @@ pub fn run() {
             // Directorio de datos del sistema operativo:
             //   macOS:   ~/Library/Application Support/com.damebola.app
             //   Windows: %APPDATA%\com.damebola.app
-            let data_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&data_dir)?;
+            // Las instancias de desarrollo deben usar su propia carpeta (DAMEBOLA_DATA_DIR); ver `instance.rs`.
+            let runtime = instance::RuntimeEnv::resolve(app.path().app_data_dir()?, |k| std::env::var(k).ok());
+            for var in &runtime.ignored {
+                eprintln!("Aviso: {var} se ignora porque no se indicó DAMEBOLA_DATA_DIR (protege la identidad de la instalación real).");
+            }
+            // Una sola instancia por carpeta de datos (misma base, misma identidad, mismo puerto).
+            let lock = instance::InstanceLock::acquire(&runtime.data_dir)?;
+            app.manage(lock);
+            let data_dir = runtime.data_dir.clone();
             let db = Arc::new(Database::open(&data_dir.join("damebola.db"))?);
 
             let handle = app.handle().clone();
@@ -81,13 +89,14 @@ pub fn run() {
                 let _ = handle.emit("playback://status", status);
             });
 
-            // Identidad de red: certificado en SQLite, clave privada en el llavero del SO.
+            // Identidad de red: certificado en SQLite, clave privada en el llavero del SO (o en archivo).
+            // Si la identidad tiene un problema NO se regenera: la red queda detenida con un error visible.
             let net_store = NetStore::new(Arc::clone(&db));
-            let secrets = identity::open_secret_store(&app.config().identifier, data_dir.join("device.key"));
-            let device_identity = identity::load_or_create(&net_store, secrets.as_ref())?;
+            let backends = identity::open_secret_backends(&app.config().identifier, &data_dir, runtime.force_file_keys);
+            let provider = Arc::new(StoreIdentityProvider { store: net_store.clone(), backends });
             let name_source = SettingsStore::new(Arc::clone(&db));
             let net = NetworkService::new(
-                device_identity,
+                provider,
                 net_store,
                 Arc::new(TauriNetEvents(app.handle().clone())),
                 Arc::new(AppAlertHandler(app.handle().clone())),
@@ -98,6 +107,7 @@ pub fn run() {
                     mdns: true,
                     timings: NetTimings::default(),
                     name: Arc::new(move || name_source.get().map(|s| s.user_name).unwrap_or_default()),
+                    allow_loopback: runtime.allow_loopback,
                 },
             )?;
 
@@ -150,6 +160,9 @@ pub fn run() {
             commands::net_forget,
             commands::net_add_manual,
             commands::net_send_alert,
+            commands::net_retry_identity,
+            commands::net_reset_identity,
+            commands::net_rename_device,
         ])
         .run(tauri::generate_context!())
         .expect("error al ejecutar DameBola");

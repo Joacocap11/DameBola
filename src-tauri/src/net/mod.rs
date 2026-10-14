@@ -3,6 +3,7 @@
 pub mod antispam;
 pub mod discovery;
 pub mod identity;
+pub mod ipfilter;
 pub mod protocol;
 pub mod service;
 pub mod store;
