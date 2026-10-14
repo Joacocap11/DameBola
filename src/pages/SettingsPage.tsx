@@ -58,7 +58,7 @@ export function SettingsPage() {
       />
 
       <Card>
-        <Row title="Tu nombre" hint="Identificará quién envía una alerta en fases futuras.">
+        <Row title="Tu nombre" hint="Se muestra en los otros equipos y aparece como remitente de tus alertas.">
           <input value={draft.userName} maxLength={40} onChange={(e) => patch({ userName: e.target.value })} aria-invalid={!nameOk} className={`w-56 rounded-xl border bg-zinc-950 px-3 py-2 text-sm outline-none focus:border-red-500 ${nameOk ? "border-zinc-700" : "border-red-600"}`} />
         </Row>
 

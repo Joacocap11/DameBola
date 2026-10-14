@@ -4,8 +4,13 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AlertContext,
   AlertStarted,
+  AlertSendResult,
   AppInfo,
+  DeviceView,
   ImportReport,
+  NetStatus,
+  NetworkSettings,
+  PairingView,
   PlaybackStatus,
   Settings,
   Song,
@@ -35,6 +40,21 @@ export const api = {
   closeAlert: () => invoke<void>("close_alert"),
   getAlertContext: () => invoke<AlertContext | null>("get_alert_context"),
   isAlertActive: () => invoke<boolean>("is_alert_active"),
+
+  netGetStatus: () => invoke<NetStatus>("net_get_status"),
+  netListDevices: () => invoke<DeviceView[]>("net_list_devices"),
+  netGetPairing: () => invoke<PairingView[]>("net_get_pairing"),
+  netGetSettings: () => invoke<NetworkSettings>("net_get_settings"),
+  netSaveSettings: (settings: NetworkSettings) => invoke<NetworkSettings>("net_save_settings", { settings }),
+  netPair: (deviceId: string) => invoke<void>("net_pair", { deviceId }),
+  netPairingDecision: (deviceId: string, accept: boolean) =>
+    invoke<void>("net_pairing_decision", { deviceId, accept }),
+  netConnect: (deviceId: string) => invoke<void>("net_connect", { deviceId }),
+  netDisconnect: (deviceId: string) => invoke<void>("net_disconnect", { deviceId }),
+  netForget: (deviceId: string) => invoke<void>("net_forget", { deviceId }),
+  netAddManual: (host: string, port: number) => invoke<DeviceView>("net_add_manual", { host, port }),
+  /** Puede tardar hasta ~15 s. */
+  netSendAlert: (deviceId: string) => invoke<AlertSendResult>("net_send_alert", { deviceId }),
 };
 
 /** Los errores del backend llegan como string en español. */

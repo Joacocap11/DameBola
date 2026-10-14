@@ -4,13 +4,22 @@ import { ChickenDance } from "../components/ChickenDance";
 import { Button, Card } from "../components/ui";
 import { useToasts } from "../components/Toasts";
 import { useAppState } from "../hooks/useAppState";
+import { useNetworkState } from "../hooks/useNetworkState";
 import { countPlayable } from "../lib/songs";
 import { pluralSongs } from "../lib/format";
 import { api, errorMessage } from "../services/api";
 
 export function HomePage({ onGoToSongs }: { onGoToSongs: () => void }) {
   const { songs, alertActive } = useAppState();
+  const { devices } = useNetworkState();
   const { notify } = useToasts();
+  const connected = devices.filter((d) => d.connection === "connected");
+  const badge =
+    connected.length === 0
+      ? "Modo local"
+      : connected.length === 1
+        ? `Conectado a ${connected[0]?.name ?? "otro equipo"}`
+        : `${connected.length} dispositivos conectados`;
   const [starting, setStarting] = useState(false);
 
   const playable = songs ? countPlayable(songs) : 0;
@@ -43,7 +52,7 @@ export function HomePage({ onGoToSongs }: { onGoToSongs: () => void }) {
         </h1>
         <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm text-zinc-300">
           <Radio className="size-4 text-emerald-400" />
-          Modo local
+          {badge}
         </div>
       </div>
 
