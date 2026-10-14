@@ -53,6 +53,12 @@ export const api = {
   netDisconnect: (deviceId: string) => invoke<void>("net_disconnect", { deviceId }),
   netForget: (deviceId: string) => invoke<void>("net_forget", { deviceId }),
   netAddManual: (host: string, port: number) => invoke<DeviceView>("net_add_manual", { host, port }),
+  netRetryIdentity: () => invoke<NetStatus>("net_retry_identity"),
+  /** Destructivo: crea una identidad nueva. El backend exige `confirm === "NUEVA IDENTIDAD"`. */
+  netResetIdentity: (confirm: string) => invoke<NetStatus>("net_reset_identity", { confirm }),
+  /** `null` o texto vacío quita el alias (máx. 40 caracteres). */
+  netRenameDevice: (deviceId: string, alias: string | null) =>
+    invoke<void>("net_rename_device", { deviceId, alias }),
   /** Puede tardar hasta ~15 s. */
   netSendAlert: (deviceId: string) => invoke<AlertSendResult>("net_send_alert", { deviceId }),
 };

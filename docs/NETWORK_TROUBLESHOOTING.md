@@ -69,6 +69,22 @@ Test-NetConnection -ComputerName <IP> -Port 38473
 | Cambió la IP | Se detecta en ≤ 5 s y se vuelve a anunciar; si el otro equipo sigue sin verte, pulsá **Conectar**. |
 | Equipos con VPN o varias interfaces | Se escucha en todas las IPv4 privadas activas; si la VPN usa un rango privado, también se considera. Usá la IP correcta al conectar manualmente. |
 
+## Errores de identidad (Dispositivos muestra una tarjeta roja)
+
+La red no arranca si la identidad de este equipo no se puede verificar. **No se regenera nada por su cuenta.** Pasos en [PAIRING_SECURITY.md → Recuperación de la identidad](PAIRING_SECURITY.md#recuperación-de-la-identidad). Resumen: **Reintentar** primero (llavero bloqueado); solo si la clave realmente se perdió, «Crear identidad nueva» y volver a emparejar en ambos equipos.
+
+## «Desconectado por vos»
+
+Si pulsás **Desconectar**, el dispositivo no se reconecta solo (ni por mDNS, ni por un cambio de IP, ni al reiniciar la app) hasta que pulses **Conectar**. El otro equipo tampoco insistirá. Un corte involuntario (cable, Wi-Fi, suspensión) sí se recupera solo.
+
+## Direcciones que se rechazan
+
+DameBola solo se conecta a direcciones de la red local: privadas (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) y link-local (`169.254.0.0/16`). Se rechazan públicas, CGNAT/VPN compartida (`100.64.0.0/10`), `0.0.0.0`, multicast, broadcast, rangos de documentación/pruebas y reservados. El **descubrimiento automático** exige además que el equipo esté en la **misma subred** que una de tus interfaces (con varias interfaces vale cualquiera); la **conexión manual** y las direcciones ya guardadas de un equipo emparejado admiten otras subredes privadas (p. ej. otra VLAN enrutada). Si tu red usa un rango CGNAT (algunas VPN) no se aceptará: usá una dirección de la red local.
+
+## Nombres de dispositivos
+
+El nombre visible es tu **alias** si lo definiste (lápiz junto al dispositivo); si no, el último nombre que el propio equipo anunció (verificado por TLS). Un anuncio mDNS nunca cambia un nombre guardado.
+
 ## Desactivar la red
 
 *Dispositivos → Red local* (interruptor). Cierra el puerto, las conexiones y el anuncio mDNS. «Recibir alertas de otros equipos» y «Silenciar» controlan solo las alertas, no la conectividad.

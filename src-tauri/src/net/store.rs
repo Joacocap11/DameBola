@@ -61,7 +61,13 @@ impl NetworkSettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairedDevice {
     pub device_id: String,
+    /// Último nombre anunciado por el propio dispositivo (visto en un HELLO autenticado
+    /// por TLS). mDNS nunca lo modifica.
     pub name: String,
+    /// Nombre personalizado local. Tiene prioridad sobre `name` y nadie lo pisa.
+    pub alias: Option<String>,
+    /// `false` = el usuario lo desconectó a propósito; no se reconecta solo.
+    pub auto_connect: bool,
     pub os: String,
     /// SHA-256 del certificado, 64 hex en minúscula.
     pub fingerprint: String,
@@ -72,10 +78,17 @@ pub struct PairedDevice {
 }
 
 impl PairedDevice {
+    /// Nombre que ve el usuario: alias local o, si no hay, el anunciado.
+    pub fn display_name(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.name)
+    }
+
     fn from_row(r: &Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             device_id: r.get("device_id")?,
             name: r.get("name")?,
+            alias: r.get("alias")?,
+            auto_connect: r.get::<_, i64>("auto_connect")? != 0,
             os: r.get("os")?,
             fingerprint: r.get("fingerprint")?,
             last_address: r.get("last_address")?,
@@ -106,13 +119,42 @@ impl NetStore {
             .optional()?)
     }
 
-    pub fn set_identity_cert(&self, cert_der: &[u8]) -> AppResult<()> {
-        self.db.lock().execute(
-            "INSERT INTO device_identity (id, cert_der, created_at) VALUES (1, ?1, ?2)
-             ON CONFLICT(id) DO UPDATE SET cert_der = excluded.cert_der, created_at = excluded.created_at",
+    /// Alta de la identidad. **Nunca sobrescribe**: falla si ya hay un certificado.
+    pub fn create_identity_cert(&self, cert_der: &[u8]) -> AppResult<()> {
+        let n = self.db.lock().execute(
+            "INSERT INTO device_identity (id, cert_der, created_at) VALUES (1, ?1, ?2) ON CONFLICT(id) DO NOTHING",
             params![cert_der, now_ms()],
         )?;
+        if n == 0 {
+            return Err(AppError::Validation("Ya existe una identidad: no se sobrescribe.".into()));
+        }
         Ok(())
+    }
+
+    /// Reemplazo explícito (recuperación): archiva el certificado público anterior y guarda el nuevo
+    /// en una sola transacción. Solo debe llamarse tras una confirmación del usuario.
+    pub fn replace_identity_cert_archiving(&self, old_cert: &[u8], old_device_id: &str, old_fp_hex: &str, new_cert: &[u8], reason: &str) -> AppResult<()> {
+        let mut conn = self.db.lock();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO identity_archive (device_id, fingerprint, cert_der, archived_at, reason) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![old_device_id, old_fp_hex, old_cert, now_ms(), reason],
+        )?;
+        tx.execute(
+            "INSERT INTO device_identity (id, cert_der, created_at) VALUES (1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET cert_der = excluded.cert_der, created_at = excluded.created_at",
+            params![new_cert, now_ms()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn archived_identities(&self) -> AppResult<i64> {
+        Ok(self.db.lock().query_row("SELECT count(*) FROM identity_archive", [], |r| r.get(0))?)
+    }
+
+    pub fn has_paired_devices(&self) -> AppResult<bool> {
+        Ok(self.db.lock().query_row("SELECT EXISTS(SELECT 1 FROM paired_devices)", [], |r| r.get::<_, i64>(0))? != 0)
     }
 
     // ------------------------------------------------------------- ajustes
@@ -170,7 +212,7 @@ impl NetStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(device_id) DO UPDATE SET name = excluded.name, os = excluded.os, fingerprint = excluded.fingerprint,
                last_address = excluded.last_address, last_port = excluded.last_port, paired_at = excluded.paired_at,
-               last_seen_at = excluded.last_seen_at",
+               last_seen_at = excluded.last_seen_at, auto_connect = 1",
             params![d.device_id, d.name, d.os, d.fingerprint, d.last_address, d.last_port.map(i64::from), d.paired_at, d.last_seen_at],
         )?;
         Ok(())
@@ -188,6 +230,26 @@ impl NetStore {
             params![device_id, name, os, now_ms(), addr, port],
         )?;
         Ok(())
+    }
+
+    /// Actualiza solo la dirección conocida (p. ej. por un anuncio mDNS ya validado). No toca nombre ni alias.
+    pub fn touch_address(&self, device_id: &str, address: &str, port: u16) -> AppResult<()> {
+        self.db.lock().execute(
+            "UPDATE paired_devices SET last_address = ?2, last_port = ?3, last_seen_at = ?4 WHERE device_id = ?1",
+            params![device_id, address, i64::from(port), now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Alias local. `None` (o vacío) lo quita. Devuelve `false` si el dispositivo no existe.
+    pub fn set_alias(&self, device_id: &str, alias: Option<&str>) -> AppResult<bool> {
+        let alias = alias.map(str::trim).filter(|a| !a.is_empty());
+        Ok(self.db.lock().execute("UPDATE paired_devices SET alias = ?2 WHERE device_id = ?1", params![device_id, alias])? > 0)
+    }
+
+    /// Persiste la intención del usuario: `false` = desconectado a propósito.
+    pub fn set_auto_connect(&self, device_id: &str, auto: bool) -> AppResult<bool> {
+        Ok(self.db.lock().execute("UPDATE paired_devices SET auto_connect = ?2 WHERE device_id = ?1", params![device_id, auto as i64])? > 0)
     }
 
     /// Revoca un dispositivo. Devuelve `true` si existía.
@@ -208,6 +270,8 @@ mod tests {
         PairedDevice {
             device_id: id.to_string().repeat(32),
             name: "Ana".into(),
+            alias: None,
+            auto_connect: true,
             os: "windows".into(),
             fingerprint: fp.to_string().repeat(64),
             last_address: Some("192.0.2.10".into()),
@@ -260,5 +324,39 @@ mod tests {
         assert_eq!(back.name, "Ana R.");
         assert!(back.last_seen_at.is_some());
         assert_eq!(back.last_address.as_deref(), Some("192.0.2.10"));
+    }
+
+    #[test]
+    fn alias_and_auto_connect_survive_touch_and_repair() {
+        let s = store();
+        let d = dev('a', 'b');
+        s.upsert_paired(&d).unwrap();
+        assert!(s.set_alias(&d.device_id, Some("  Mate  ")).unwrap());
+        assert!(s.set_auto_connect(&d.device_id, false).unwrap());
+        // Un HELLO autenticado actualiza el nombre anunciado, no el alias ni la intención.
+        s.touch_paired(&d.device_id, "Ana R.", "windows", None).unwrap();
+        let back = s.get_paired(&d.device_id).unwrap().unwrap();
+        assert_eq!((back.name.as_str(), back.alias.as_deref(), back.auto_connect, back.display_name()), ("Ana R.", Some("Mate"), false, "Mate"));
+        // Quitar el alias vuelve al nombre anunciado.
+        s.set_alias(&d.device_id, Some("   ")).unwrap();
+        assert_eq!(s.get_paired(&d.device_id).unwrap().unwrap().display_name(), "Ana R.");
+        // Volver a emparejar conserva el alias y reactiva la conexión automática.
+        s.set_alias(&d.device_id, Some("Mate")).unwrap();
+        s.upsert_paired(&d).unwrap();
+        let again = s.get_paired(&d.device_id).unwrap().unwrap();
+        assert_eq!((again.alias.as_deref(), again.auto_connect), (Some("Mate"), true));
+        assert!(!s.set_alias(&"z".repeat(32), Some("x")).unwrap());
+    }
+
+    #[test]
+    fn identity_is_never_overwritten_by_create_and_replacement_archives_the_old_one() {
+        let s = store();
+        s.create_identity_cert(&[1, 2, 3]).unwrap();
+        assert!(s.create_identity_cert(&[9, 9, 9]).is_err());
+        assert_eq!(s.identity_cert().unwrap().unwrap(), vec![1, 2, 3]);
+        assert_eq!(s.archived_identities().unwrap(), 0);
+        s.replace_identity_cert_archiving(&[1, 2, 3], &"a".repeat(32), &"b".repeat(64), &[7, 7], "prueba").unwrap();
+        assert_eq!(s.identity_cert().unwrap().unwrap(), vec![7, 7]);
+        assert_eq!(s.archived_identities().unwrap(), 1);
     }
 }

@@ -234,3 +234,20 @@ pub async fn net_add_manual(svc: Svc<'_>, host: String, port: u16) -> Result<Dev
 pub async fn net_send_alert(svc: Svc<'_>, device_id: String) -> Result<AlertSendResult, String> {
     Ok(svc.net.send_alert(&device_id).await)
 }
+
+/// Reintenta cargar la identidad (no destructivo): p. ej. tras desbloquear el llavero.
+#[tauri::command]
+pub async fn net_retry_identity(svc: Svc<'_>) -> Result<NetStatus, String> {
+    Ok(svc.net.retry_identity().await)
+}
+
+/// Crea una identidad nueva. Solo con la identidad en error y con la confirmación exacta.
+#[tauri::command]
+pub async fn net_reset_identity(svc: Svc<'_>, confirm: String) -> Result<NetStatus, String> {
+    svc.net.reset_identity(&confirm).await
+}
+
+#[tauri::command]
+pub fn net_rename_device(svc: Svc, device_id: String, alias: Option<String>) -> Result<(), String> {
+    svc.net.rename_device(&device_id, alias.as_deref())
+}

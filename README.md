@@ -67,6 +67,12 @@ npm run test:rust      # backend (cargo test)
 
 La integración continua (GitHub Actions) ejecuta typecheck, pruebas, build del frontend y compilación de la app Tauri en macOS y Windows. **No** puede probar audio real ni ventanas multimonitor (los runners no tienen dispositivo de audio ni pantallas reales); eso se verifica a mano.
 
+## Estabilización (Fase 2.5)
+
+La rama `feature/phase2-stability` corrige: la identidad ya no se regenera al cambiar de almacén de claves (error recuperable + recuperación explícita), el descubrimiento rechaza direcciones públicas y de otras subredes, *Desconectar* se respeta (también tras reiniciar), «se mostró» solo se confirma si **todas** las ventanas se abrieron, y mDNS no pisa nombres guardados (alias local). Detalles: [PHASE2_STABILITY_STATUS.md](PHASE2_STABILITY_STATUS.md). El protocolo de red no cambió.
+
+Para ejecutar una instancia de **desarrollo** sin riesgo para tu instalación real, usá una carpeta propia: `DAMEBOLA_DATA_DIR="$(mktemp -d)" npm run tauri dev`.
+
 ## Red entre equipos (Fase 2)
 
 1. Abrí **Dispositivos** en ambos equipos (misma red). Aparecen bajo «Descubiertos»; si mDNS está bloqueado, **Agregar dispositivo manualmente** (IP y puerto).

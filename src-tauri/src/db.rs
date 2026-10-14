@@ -62,6 +62,26 @@ const MIGRATIONS: &[&str] = &[
         last_seen_at     INTEGER
     ) STRICT;
     "#,
+    // 3: Fase 2.5 (estabilización). Solo agrega columnas con valor por defecto y una
+    // tabla de archivo; los nombres y emparejamientos existentes se conservan intactos.
+    //
+    // - `name` pasa a significar «último nombre anunciado y autenticado por el propio
+    //   dispositivo»; `alias` es el nombre personalizado local (nunca lo pisa la red).
+    // - `auto_connect = 0` guarda la desconexión voluntaria: no se reconecta solo.
+    // - `identity_archive` guarda certificados públicos reemplazados (nunca claves privadas).
+    r#"
+    ALTER TABLE paired_devices ADD COLUMN alias TEXT CHECK (alias IS NULL OR length(trim(alias)) > 0);
+    ALTER TABLE paired_devices ADD COLUMN auto_connect INTEGER NOT NULL DEFAULT 1 CHECK (auto_connect IN (0, 1));
+
+    CREATE TABLE identity_archive (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        device_id   TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        cert_der    BLOB NOT NULL,
+        archived_at INTEGER NOT NULL,
+        reason      TEXT NOT NULL
+    ) STRICT;
+    "#,
 ];
 
 pub struct Database {
@@ -172,5 +192,36 @@ mod tests {
             [&"b".repeat(64)],
         );
         assert!(bad.is_err());
+    }
+
+    /// Base de la versión 0.1.2 (migración 2) con un dispositivo emparejado: tras migrar conserva
+    /// su nombre exacto, queda con reconexión automática activa y sin alias.
+    #[test]
+    fn upgrading_from_migration_2_preserves_paired_device_names() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("v2.db");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            migrate_to(&mut conn, 2).unwrap();
+            assert_eq!(version(&conn), 2);
+            conn.execute(
+                "INSERT INTO paired_devices (device_id, name, os, fingerprint, last_address, last_port, paired_at, last_seen_at)
+                 VALUES (?1, 'Mate de Oficina', 'windows', ?2, '192.0.2.9', 38473, 10, 20)",
+                [&"a".repeat(32), &"b".repeat(64)],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO device_identity (id, cert_der, created_at) VALUES (1, x'0102', 5)", []).unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        let conn = db.lock();
+        assert_eq!(version(&conn), MIGRATIONS.len() as i64);
+        let (name, alias, auto): (String, Option<String>, i64) = conn
+            .query_row("SELECT name, alias, auto_connect FROM paired_devices", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!((name.as_str(), alias, auto), ("Mate de Oficina", None, 1));
+        let cert: Vec<u8> = conn.query_row("SELECT cert_der FROM device_identity", [], |r| r.get(0)).unwrap();
+        assert_eq!(cert, vec![1, 2]);
+        let n: i64 = conn.query_row("SELECT count(*) FROM identity_archive", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
     }
 }
