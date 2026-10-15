@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useToasts } from "../components/Toasts";
 import { api, errorMessage } from "../services/api";
-import { onNetDevices, onNetPairing, onNetStatus } from "../services/events";
+import { onNetDevices, onNetPairing, onNetSettings, onNetStatus } from "../services/events";
 import type { DeviceView, NetStatus, NetworkSettings, PairingView } from "../types";
 
 interface NetworkState {
@@ -36,7 +36,7 @@ export function NetworkStateProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     // Primero se suscribe, luego se carga: así no se pierde ningún evento intermedio.
-    const unlisten = [onNetStatus(setStatus), onNetDevices(setDevices), onNetPairing(setPairings)];
+    const unlisten = [onNetStatus(setStatus), onNetDevices(setDevices), onNetPairing(setPairings), onNetSettings(setSettings)];
 
     Promise.all([api.netGetStatus(), api.netListDevices(), api.netGetPairing(), api.netGetSettings()])
       .then(([st, dev, pair, set]) => {

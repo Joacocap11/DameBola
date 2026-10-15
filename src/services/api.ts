@@ -6,6 +6,7 @@ import type {
   AlertStarted,
   AlertSendResult,
   AppInfo,
+  BackgroundStatus,
   DeviceView,
   ImportReport,
   NetStatus,
@@ -60,6 +61,11 @@ export const api = {
   netRenameDevice: (deviceId: string, alias: string | null) =>
     invoke<void>("net_rename_device", { deviceId, alias }),
   /** Puede tardar hasta ~15 s. */
+  /** Envío con el destinatario del atajo; el backend aplica las mismas reglas que el atajo global y la bandeja. */
+  sendShortcutAlert: () => invoke<AlertSendResult>("send_shortcut_alert"),
+  getBackgroundStatus: () => invoke<BackgroundStatus>("get_background_status"),
+  /** Salida completa (cerrar la ventana solo la oculta si el segundo plano está activo). */
+  quitApp: () => invoke<void>("quit_app"),
   netSendAlert: (deviceId: string) => invoke<AlertSendResult>("net_send_alert", { deviceId }),
 };
 

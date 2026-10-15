@@ -38,7 +38,7 @@ jobs:
           if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer" }
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $short = (git rev-parse --short=7 HEAD).Trim()
-          $name = "DameBola-$version-stability-$short-Windows-x64-setup.exe"
+          $name = "DameBola-$version-background-$short-Windows-x64-setup.exe"
           $destination = "preview-download/$name"
           Copy-Item $installers[0].FullName $destination
           $hash = (Get-FileHash $destination -Algorithm SHA256).Hash.ToLowerInvariant()

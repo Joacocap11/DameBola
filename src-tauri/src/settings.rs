@@ -15,6 +15,17 @@ pub const MIN_DURATION_SECS: u32 = 3;
 pub const MAX_DURATION_SECS: u32 = 120;
 const MAX_USER_NAME_CHARS: usize = 40;
 
+/// Dónde se escucha el atajo de envío.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShortcutScope {
+    /// Solo con la ventana principal en primer plano (comportamiento de las fases anteriores).
+    #[default]
+    Local,
+    /// Registrado en el sistema operativo: funciona con la ventana oculta u otra app enfocada.
+    Global,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -26,12 +37,22 @@ pub struct Settings {
     pub sound_enabled: bool,
     pub animations_enabled: bool,
     pub launch_at_login: bool,
-    /// F12 en la ventana principal; nunca es un atajo global.
+    /// Activa el atajo de envío (local o global según `shortcut_scope`).
     pub shortcut_enabled: bool,
     /// Combinación canónica (ver `shortcut.rs`); F12 por defecto.
     pub shortcut_key: String,
     /// None elige el único equipo emparejado; varios requieren selección.
     pub shortcut_device_id: Option<String>,
+    /// `local` por defecto: el modo global exige activarlo explícitamente.
+    pub shortcut_scope: ShortcutScope,
+    /// Cerrar la ventana la oculta y deja DameBola en la bandeja.
+    pub keep_running_on_close: bool,
+    /// Al iniciar con el sistema, no mostrar la ventana principal.
+    pub start_minimized: bool,
+    /// Icono en la bandeja / barra de menús.
+    pub show_tray_icon: bool,
+    /// Solo lo escribe el backend (aviso de primer cierre); el frontend no puede cambiarlo.
+    pub background_notice_shown: bool,
 }
 
 impl Default for Settings {
@@ -46,6 +67,11 @@ impl Default for Settings {
             shortcut_enabled: true,
             shortcut_key: crate::shortcut::DEFAULT_SHORTCUT.into(),
             shortcut_device_id: None,
+            shortcut_scope: ShortcutScope::Local,
+            keep_running_on_close: true,
+            start_minimized: false,
+            show_tray_icon: true,
+            background_notice_shown: false,
         }
     }
 }
@@ -74,6 +100,11 @@ impl Settings {
         self.shortcut_key = crate::shortcut::normalize(&self.shortcut_key).map_err(AppError::Validation)?;
         if self.shortcut_device_id.as_ref().is_some_and(|id| !crate::net::protocol::is_device_id(id)) {
             return Err(AppError::Validation("El destinatario del atajo no es válido.".into()));
+        }
+        if self.keep_running_on_close && !self.show_tray_icon {
+            return Err(AppError::Validation(
+                "Para mantener DameBola en segundo plano tiene que estar visible el icono de la bandeja; así siempre hay una forma de abrirlo y de salir.".into(),
+            ));
         }
         Ok(self)
     }
@@ -117,8 +148,18 @@ impl SettingsStore {
         }
     }
 
+    /// Marca que el aviso de "seguirá en segundo plano" ya se mostró.
+    pub fn mark_background_notice_shown(&self) -> AppResult<()> {
+        let mut settings = self.get()?;
+        settings.background_notice_shown = true;
+        let json = serde_json::to_string(&settings).map_err(|e| AppError::System(format!("No se pudieron serializar los ajustes: {e}")))?;
+        self.write(KEY_APP, &json)
+    }
+
     pub fn save(&self, settings: Settings) -> AppResult<Settings> {
-        let settings = settings.validated()?;
+        let mut settings = settings.validated()?;
+        // Campo del backend: un guardado con un valor viejo no puede reactivar el aviso.
+        settings.background_notice_shown = self.get()?.background_notice_shown;
         let json = serde_json::to_string(&settings)
             .map_err(|e| AppError::System(format!("No se pudieron serializar los ajustes: {e}")))?;
         self.write(KEY_APP, &json)?;
@@ -243,5 +284,48 @@ mod tests {
         let st = store();
         st.write(KEY_APP, r#"{"userName":"Ana","shortcutKey":"Backspace"}"#).unwrap();
         assert_eq!(st.get().unwrap().shortcut_key, "F12");
+    }
+
+    #[test]
+    fn upgrading_keeps_the_local_shortcut_and_enables_background_defaults() {
+        let st = store();
+        st.write(KEY_APP, r#"{"userName":"Ana","shortcutKey":"Ctrl+Shift+B","shortcutEnabled":true}"#).unwrap();
+        let s = st.get().unwrap();
+        assert_eq!(s.shortcut_scope, ShortcutScope::Local, "nunca se activa el modo global por sí solo");
+        assert!(s.keep_running_on_close && s.show_tray_icon && !s.start_minimized && !s.background_notice_shown);
+        assert_eq!(s.shortcut_key, "Ctrl+Shift+B");
+    }
+
+    #[test]
+    fn background_settings_persist_and_scope_serializes_as_text() {
+        let st = store();
+        let mut s = st.get().unwrap();
+        s.shortcut_scope = ShortcutScope::Global;
+        s.keep_running_on_close = false;
+        s.start_minimized = true;
+        st.save(s.clone()).unwrap();
+        assert_eq!(st.get().unwrap(), s);
+        assert!(serde_json::to_string(&s).unwrap().contains(r#""shortcutScope":"global""#));
+    }
+
+    #[test]
+    fn background_without_tray_is_rejected_but_quitting_on_close_without_tray_is_fine() {
+        let st = store();
+        let mut s = st.get().unwrap();
+        s.show_tray_icon = false;
+        assert!(st.save(s.clone()).is_err(), "sin bandeja no hay forma de reabrir");
+        s.keep_running_on_close = false;
+        assert!(st.save(s).is_ok());
+    }
+
+    #[test]
+    fn notice_flag_is_owned_by_the_backend() {
+        let st = store();
+        let s = st.get().unwrap();
+        st.mark_background_notice_shown().unwrap();
+        assert!(st.save(s).unwrap().background_notice_shown, "un guardado con valor viejo no lo borra");
+        let mut forged = st.get().unwrap();
+        forged.background_notice_shown = false;
+        assert!(st.save(forged).unwrap().background_notice_shown);
     }
 }

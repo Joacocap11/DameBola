@@ -73,6 +73,14 @@ La rama `feature/phase2-stability` corrige: la identidad ya no se regenera al ca
 
 Para ejecutar una instancia de **desarrollo** sin riesgo para tu instalación real, usá una carpeta propia: `DAMEBOLA_DATA_DIR="$(mktemp -d)" npm run tauri dev`.
 
+## Segundo plano y atajos globales (Fase 2.6)
+
+- **Cerrar la ventana no cierra DameBola**: se oculta y la red, la recepción de alertas y los atajos siguen activos. La primera vez se muestra un aviso. Se desactiva en Configuración → Segundo plano; entonces cerrar la ventana sale.
+- **Bandeja del sistema (Windows) / barra de menús (macOS)**: Abrir DameBola, Enviar DAME BOLA, Silenciar/Reactivar alertas, Iniciar con el sistema y **Salir completamente**. Muestra el estado de conexión y el destinatario; «Enviar» se deshabilita si no hay un destinatario válido y conectado.
+- **Atajo global (opcional)**: Configuración → Alcance del atajo → Global, p. ej. `Ctrl + Shift + B` / `Cmd + Shift + B`. Por defecto el atajo sigue siendo local (solo con la ventana enfocada). Ver [docs/KEYBOARD_SHORTCUT.md](docs/KEYBOARD_SHORTCUT.md).
+- **Iniciar con el sistema** e **Iniciar minimizado**: solo si los activás; sin permisos de administrador.
+- Estado, diferencias entre sistemas, limitaciones y pruebas pendientes: [PHASE2_BACKGROUND_STATUS.md](PHASE2_BACKGROUND_STATUS.md).
+
 ## Red entre equipos (Fase 2)
 
 1. Abrí **Dispositivos** en ambos equipos (misma red). Aparecen bajo «Descubiertos»; si mDNS está bloqueado, **Agregar dispositivo manualmente** (IP y puerto).
