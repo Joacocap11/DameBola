@@ -1,46 +1,32 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   beginShortcutCapture, createShortcutCapture, createShortcutHandler, DEFAULT_SHORTCUT, describeShortcut,
-  isShortcutCaptureActive, normalizeShortcut, shortcutFromEvent, shortcutRecipient,
+  globalShortcutIssue, isShortcutCaptureActive, normalizeShortcut, shortcutFromEvent,
 } from "./shortcut";
-import type { AlertSendResult, DeviceView, Settings } from "../types";
+import type { AlertSendResult, Settings } from "../types";
 
-const settings: Settings = { userName: "Ana", alertVolume: 80, alertDurationSecs: 15, soundEnabled: true, animationsEnabled: true, launchAtLogin: false, shortcutEnabled: true, shortcutKey: "F12", shortcutDeviceId: null };
-const device = (id: string, connected = true): DeviceView => ({ deviceId: id, name: id, announcedName: id, alias: null, autoConnect: true, os: "windows", connection: connected ? "connected" : "disconnected", pairing: "paired", discovered: true, addresses: [], port: 38473, lastSeenMs: null, lastError: null });
+const settings: Settings = { userName: "Ana", alertVolume: 80, alertDurationSecs: 15, soundEnabled: true, animationsEnabled: true, launchAtLogin: false, shortcutEnabled: true, shortcutKey: "F12", shortcutDeviceId: null, shortcutScope: "local", keepRunningOnClose: true, startMinimized: false, showTrayIcon: true, backgroundNoticeShown: false };
 const key = (patch: Record<string, unknown> = {}) => ({ code: "F12", repeat: false, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, isComposing: false, defaultPrevented: false, preventDefault: vi.fn(), ...patch });
 const shown: AlertSendResult = { status: "shown", accepted: true, reason: null, message: "Mostrada" };
 
-describe("F12 recipient", () => {
-  it("uses only paired identities, never a newly discovered device", () => {
-    const discovered = { ...device("intruder"), pairing: "unpaired" as const };
-    expect(shortcutRecipient([discovered, device("mate")], null).deviceId).toBe("mate");
-    expect(() => shortcutRecipient([discovered], null)).toThrow("Emparejá");
-  });
-  it("requires an explicit choice with several pairs, even if only one is online", () => {
-    expect(() => shortcutRecipient([device("a"), device("b", false)], null)).toThrow("varios");
-    expect(shortcutRecipient([device("a"), device("b")], "b").deviceId).toBe("b");
-  });
-  it("never falls back to another recipient after the selected pair is forgotten", () => {
-    expect(() => shortcutRecipient([device("a")], "b")).toThrow("ya no está emparejado");
-  });
-});
-
-describe("focused F12 sender", () => {
-  it("sends to the paired recipient through the remote-alert API", async () => {
+// El destinatario, la conexión y la autorización las decide el backend (src-tauri/src/send.rs):
+// aquí solo se prueba cuándo el frontend pide el envío.
+describe("focused shortcut sender", () => {
+  it("asks the backend to send and reports its result", async () => {
     const send = vi.fn().mockResolvedValue(shown);
     const report = vi.fn();
-    const handle = createShortcutHandler({ isFocused: () => true, getState: () => ({ settings, devices: [device("mate")] }), send, report });
+    const handle = createShortcutHandler({ isFocused: () => true, getState: () => ({ settings }), send, report });
     const event = key();
     await handle(event);
     expect(event.preventDefault).toHaveBeenCalledOnce();
-    expect(send).toHaveBeenCalledExactlyOnceWith("mate");
+    expect(send).toHaveBeenCalledOnce();
     expect(report).toHaveBeenCalledWith("success", "Mostrada");
   });
   it("ignores background input, disabled shortcuts, repeats, modifiers and other keys", async () => {
     const send = vi.fn();
     let focused = false;
     let current = settings;
-    const handle = createShortcutHandler({ isFocused: () => focused, getState: () => ({ settings: current, devices: [device("mate")] }), send, report: vi.fn() });
+    const handle = createShortcutHandler({ isFocused: () => focused, getState: () => ({ settings: current }), send, report: vi.fn() });
     await handle(key());
     focused = true;
     current = { ...settings, shortcutEnabled: false };
@@ -49,10 +35,29 @@ describe("focused F12 sender", () => {
     for (const patch of [{ repeat: true }, { ctrlKey: true }, { altKey: true }, { shiftKey: true }, { metaKey: true }, { code: "F8" }, { isComposing: true }]) await handle(key(patch));
     expect(send).not.toHaveBeenCalled();
   });
+  it("global scope: the focused window never sends too, so one press cannot raise two alerts", async () => {
+    const send = vi.fn().mockResolvedValue(shown);
+    const event = key();
+    const handle = createShortcutHandler({ isFocused: () => true, getState: () => ({ settings: { ...settings, shortcutScope: "global" } }), send, report: vi.fn() });
+    await handle(event);
+    expect(send).not.toHaveBeenCalled();
+    expect(event.preventDefault).not.toHaveBeenCalled();
+  });
+  it("switching between local and global takes effect on the next key press", async () => {
+    let current = settings;
+    const send = vi.fn().mockResolvedValue(shown);
+    const handle = createShortcutHandler({ isFocused: () => true, getState: () => ({ settings: current }), send, report: vi.fn() });
+    await handle(key());
+    current = { ...settings, shortcutScope: "global" };
+    await handle(key());
+    current = { ...settings, shortcutScope: "local" };
+    await handle(key());
+    expect(send).toHaveBeenCalledTimes(2);
+  });
   it("does not queue another request while waiting for confirmation", async () => {
     let resolve!: (result: AlertSendResult) => void;
     const send = vi.fn().mockImplementation(() => new Promise<AlertSendResult>((r) => { resolve = r; }));
-    const handle = createShortcutHandler({ isFocused: () => true, getState: () => ({ settings, devices: [device("mate")] }), send, report: vi.fn() });
+    const handle = createShortcutHandler({ isFocused: () => true, getState: () => ({ settings }), send, report: vi.fn() });
     const first = handle(key());
     await handle(key());
     expect(send).toHaveBeenCalledOnce();
@@ -63,17 +68,15 @@ describe("focused F12 sender", () => {
     resolve(shown);
     await second;
   });
-  it("reports offline without sending or choosing another device", async () => {
-    const send = vi.fn();
+  it("reports a backend error without crashing", async () => {
     const report = vi.fn();
-    const handle = createShortcutHandler({ isFocused: () => true, getState: () => ({ settings: { ...settings, shortcutDeviceId: "mate" }, devices: [device("mate", false), device("other")] }), send, report });
+    const handle = createShortcutHandler({ isFocused: () => true, getState: () => ({ settings }), send: vi.fn().mockRejectedValue("Falló"), report });
     await handle(key());
-    expect(send).not.toHaveBeenCalled();
-    expect(report).toHaveBeenCalledWith("error", expect.stringContaining("no está conectado"));
+    expect(report).toHaveBeenCalledWith("error", "Falló");
   });
   it("does not present an accepted but unconfirmed alert as delivered", async () => {
     const report = vi.fn();
-    const handle = createShortcutHandler({ isFocused: () => true, getState: () => ({ settings, devices: [device("mate")] }), send: vi.fn().mockResolvedValue({ ...shown, status: "timeout", message: "Sin confirmación" }), report });
+    const handle = createShortcutHandler({ isFocused: () => true, getState: () => ({ settings }), send: vi.fn().mockResolvedValue({ ...shown, status: "timeout", message: "Sin confirmación" }), report });
     await handle(key());
     expect(report).toHaveBeenCalledWith("error", "Sin confirmación");
   });
@@ -187,7 +190,7 @@ describe("atajo configurable al enviar", () => {
   const mk = (current: Settings, isCapturing?: () => boolean) => {
     const send = vi.fn().mockResolvedValue(shown);
     const report = vi.fn();
-    const handle = createShortcutHandler({ isFocused: () => true, isCapturing, getState: () => ({ settings: current, devices: [device("mate")] }), send, report });
+    const handle = createShortcutHandler({ isFocused: () => true, isCapturing, getState: () => ({ settings: current }), send, report });
     return { send, report, handle };
   };
 
@@ -198,13 +201,13 @@ describe("atajo configurable al enviar", () => {
     await handle(key({ code: "KeyB", shiftKey: true }));
     expect(send).not.toHaveBeenCalled();
     await handle(key({ code: "KeyB", ctrlKey: true, shiftKey: true }));
-    expect(send).toHaveBeenCalledExactlyOnceWith("mate");
+    expect(send).toHaveBeenCalledOnce();
   });
 
   it("al cambiar de F12 a F8 la tecla anterior deja de enviar (estado leído en cada pulsación)", async () => {
     let current = settings;
     const send = vi.fn().mockResolvedValue(shown);
-    const handle = createShortcutHandler({ isFocused: () => true, getState: () => ({ settings: current, devices: [device("mate")] }), send, report: vi.fn() });
+    const handle = createShortcutHandler({ isFocused: () => true, getState: () => ({ settings: current }), send, report: vi.fn() });
     await handle(key({ code: "F12" }));
     expect(send).toHaveBeenCalledTimes(1);
     current = { ...settings, shortcutKey: "F8" };
@@ -233,28 +236,18 @@ describe("atajo configurable al enviar", () => {
     b();
     expect(isShortcutCaptureActive()).toBe(false);
   });
+});
 
-  it("cambiar de destinatario o de estado de conexión no permite envíos simultáneos ni selecciones inesperadas", async () => {
-    let resolve!: (r: AlertSendResult) => void;
-    const send = vi.fn().mockImplementation(() => new Promise<AlertSendResult>((r) => { resolve = r; }));
-    let state = { settings: { ...settings, shortcutDeviceId: "a" }, devices: [device("a"), device("b")] };
-    const handle = createShortcutHandler({ isFocused: () => true, getState: () => state, send, report: vi.fn() });
-    const first = handle(key());
-    state = { settings: { ...settings, shortcutDeviceId: "b" }, devices: [device("a"), device("b")] };
-    await handle(key());
-    expect(send).toHaveBeenCalledExactlyOnceWith("a");
-    resolve(shown);
-    await first;
-    // El destinatario seleccionado se desconecta: no se cambia a otro.
-    state = { settings: { ...settings, shortcutDeviceId: "b" }, devices: [device("a"), device("b", false)] };
-    await handle(key());
-    expect(send).toHaveBeenCalledTimes(1);
+describe("advertencias del atajo global", () => {
+  it("Windows rechaza Win + …; macOS rechaza combinaciones del sistema", () => {
+    expect(globalShortcutIssue("Meta+B", "other")?.level).toBe("error");
+    expect(globalShortcutIssue("Ctrl+Shift+B", "other")).toBeNull();
+    expect(globalShortcutIssue("Meta+Q", "mac")?.level).toBe("error");
+    expect(globalShortcutIssue("Meta+Shift+4", "mac")?.level).toBe("error");
+    expect(globalShortcutIssue("Meta+Shift+B", "mac")).toBeNull();
   });
-
-  it("los mensajes de error nombran el atajo configurado", async () => {
-    const report = vi.fn();
-    const handle = createShortcutHandler({ isFocused: () => true, getState: () => ({ settings: { ...settings, shortcutKey: "Ctrl+Shift+B" }, devices: [] }), send: vi.fn(), report });
-    await handle(key({ code: "KeyB", ctrlKey: true, shiftKey: true }));
-    expect(report).toHaveBeenCalledWith("error", expect.stringContaining("Ctrl + Shift + B"));
+  it("una tecla de función sola es válida pero se advierte que se le quita a las demás apps", () => {
+    expect(globalShortcutIssue("F12", "other")?.level).toBe("warning");
+    expect(globalShortcutIssue("Shift+F5", "other")).toBeNull();
   });
 });

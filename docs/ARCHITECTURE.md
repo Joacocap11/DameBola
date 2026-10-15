@@ -70,3 +70,31 @@ Detalles: [NETWORK_PROTOCOL.md](NETWORK_PROTOCOL.md), [PAIRING_SECURITY.md](PAIR
 - **Desconexión voluntaria:** `paired_devices.auto_connect` (persistente) + conjuntos `paused` / `remote_paused` en memoria; se comprueba al registrar el HELLO (cierra carreras con intentos en curso), en `connect_device` y en `reconnect_pass`. El aviso al par va como cierre WebSocket `4001`.
 - **Alertas (`alert.rs`):** `open_all` sobre los traits `Surface`/`WindowHandle` (Tauri en producción, simulado en pruebas) con política todo-o-nada; el audio solo suena tras abrir todas las ventanas.
 - **Nombres:** `name` (anunciado, autenticado) + `alias` (local) en `paired_devices`; mDNS solo alimenta la lista de descubiertos en memoria.
+
+## Fase 2.6: segundo plano y atajos globales
+
+Módulos nuevos en `src-tauri/src`:
+
+| Módulo | Responsabilidad |
+|---|---|
+| `background.rs` | Ciclo de vida: cerrar = ocultar (`close_action`), `RunEvent::ExitRequested` sin ventanas no termina el proceso, salida completa (`quit`/`shutdown`), `apply_settings` transaccional, envío desde Rust (`send_from`), evento del atajo global. |
+| `tray.rs` | Icono de bandeja/barra de menús. `model()` (pura) calcula textos y si «Enviar» está habilitado; Tauri solo aplica el resultado. |
+| `hotkey.rs` | `GlobalShortcuts` (registro transaccional sobre un trait `ShortcutBackend`) y `PressGate` (repetición de tecla). |
+| `send.rs` | `resolve_recipient`, `SendGuard` y `send_to_recipient`: **única** implementación de «envío del usuario» (atajo local, atajo global, bandeja). |
+
+```mermaid
+flowchart LR
+  K[Atajo global (SO)] --> H[on_global_event]
+  T[Menú de bandeja] --> S
+  L[Atajo local (React)] --> C[send_shortcut_alert]
+  H -->|PressGate| S[send_from]
+  C --> S
+  S -->|SendGuard + destinatario| N[NetworkService::send_alert]
+```
+
+- **El backend es la fuente de verdad del envío**: React solo detecta la tecla en modo local. No hace falta ninguna página montada.
+- **Ventana principal**: `visible:false` en `tauri.conf.json`; `setup` la muestra salvo al iniciar con el sistema con «Iniciar minimizado» (argumento `--autostart` registrado por `tauri-plugin-autostart`). Cerrarla la oculta si `keepRunningOnClose` y hay bandeja activa; si no, sale. Las ventanas de alerta son independientes de la principal y no la abren.
+- **Salida completa** (`shutdown`, idempotente): libera atajos globales, termina la alerta y su audio, detiene el audio, detiene la red (cierra WebSocket/TLS y mDNS) y quita el icono; luego `app.exit(0)`. También corre en `RunEvent::Exit` (p. ej. Cmd+Q).
+- **Una sola instancia**: `tauri-plugin-single-instance` (muestra la ventana de la primera) además del bloqueo por carpeta de datos existente. Las instancias de desarrollo con `DAMEBOLA_DATA_DIR` no usan el plugin, para poder probar dos equipos en la misma máquina.
+- **Ajustes** (`settings.rs`, JSON en SQLite, campos nuevos con valor por defecto): `shortcutScope` (`local`), `keepRunningOnClose` (`true`), `startMinimized` (`false`), `showTrayIcon` (`true`), `backgroundNoticeShown` (solo lo escribe el backend). `keepRunningOnClose` exige bandeja: así siempre hay forma de abrir y de salir.
+- **Seguridad**: sin puertos nuevos, sin cambios en TLS, identidad ni emparejamiento; el destinatario debe estar emparejado y conectado.

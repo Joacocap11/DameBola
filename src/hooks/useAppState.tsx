@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, errorMessage } from "../services/api";
-import { onAlertState, onPlaybackStatus } from "../services/events";
+import { onAlertState, onPlaybackStatus, onSettingsChanged } from "../services/events";
 import type { AppInfo, PlaybackStatus, Settings, Song } from "../types";
 import { useToasts } from "../components/Toasts";
 
@@ -63,7 +63,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     api.getPlaybackStatus().then(setPlayback).catch(() => undefined);
     api.isAlertActive().then(setAlertActive).catch(() => undefined);
 
-    const unlisten = [onPlaybackStatus(setPlayback), onAlertState(setAlertActive)];
+    const unlisten = [onPlaybackStatus(setPlayback), onAlertState(setAlertActive), onSettingsChanged(setSettings)];
     return () => {
       unlisten.forEach((p) => void p.then((fn) => fn()));
     };

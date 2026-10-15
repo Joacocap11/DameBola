@@ -1,4 +1,4 @@
-import type { AlertSendResult, DeviceView, Settings } from "../types";
+import type { AlertSendResult, Settings } from "../types";
 
 // ---------------------------------------------------------------------------
 // Formato canónico del atajo: "F8", "Ctrl+Shift+B". Orden de modificadores
@@ -152,45 +152,67 @@ export function createShortcutCapture(cb: CaptureCallbacks) {
 }
 
 // ---------------------------------------------------------------------------
-// Envío
+// Atajo global: avisos inmediatos (el backend valida y registra; esto solo da respuesta rápida)
 // ---------------------------------------------------------------------------
 
-export function shortcutRecipient(devices: DeviceView[], targetId: string | null, label = "el atajo"): DeviceView {
-  const paired = devices.filter((d) => d.pairing === "paired");
-  if (targetId !== null) {
-    const target = paired.find((d) => d.deviceId === targetId);
-    if (!target) throw new Error(`El destinatario de ${label} ya no está emparejado. Elegí otro en Configuración.`);
-    return target;
+export type ShortcutIssue = { level: "error" | "warning"; text: string };
+
+const MAC_RESERVED: [string[], string][] = [
+  [[], "Q"], [[], "H"], [[], "M"], [[], "W"], [[], "F"],
+  [["Shift"], "Q"], [["Shift"], "3"], [["Shift"], "4"], [["Shift"], "5"], [["Shift"], "6"],
+  [["Ctrl"], "Q"], [["Alt"], "H"], [["Alt"], "M"], [["Alt"], "D"],
+];
+
+/** Reglas de combinaciones reservadas por el sistema (espejo de `validate_global` en shortcut.rs). */
+export function globalShortcutIssue(canonical: string, platform: Platform = detectPlatform()): ShortcutIssue | null {
+  const parts = canonical.split("+");
+  const key = parts[parts.length - 1]!;
+  const mods = parts.slice(0, -1);
+  if (platform === "other" && mods.includes("Meta")) {
+    return { level: "error", text: "Windows reserva las combinaciones con la tecla Windows (Win + …). Usá Ctrl, Alt o Shift." };
   }
-  if (paired.length === 0) throw new Error(`Emparejá un dispositivo en Dispositivos antes de usar ${label}.`);
-  if (paired.length !== 1) throw new Error(`Elegí el destinatario de ${label} en Configuración: hay varios equipos emparejados.`);
-  return paired[0]!;
+  if (platform === "mac" && mods.includes("Meta")) {
+    const rest = mods.filter((m) => m !== "Meta").sort();
+    if (MAC_RESERVED.some(([extra, k]) => k === key && extra.length === rest.length && extra.every((m, i) => m === rest[i]))) {
+      return { level: "error", text: "macOS reserva esta combinación para el sistema. Elegí otra." };
+    }
+  }
+  if (mods.length === 0) {
+    return { level: "warning", text: "Una tecla sola como atajo global se la quita a todas las demás aplicaciones. Es mejor una combinación como Ctrl + Shift + B." };
+  }
+  return null;
 }
+
+// ---------------------------------------------------------------------------
+// Envío (solo local: con la ventana enfocada)
+// ---------------------------------------------------------------------------
 
 type Report = (kind: "success" | "warning" | "error", message: string) => void;
 
-/** Main-window handler. One request at a time; holding the key never queues alerts. */
+/**
+ * Manejador del atajo LOCAL. Solo detecta la tecla; destinatario, emparejamiento, conexión,
+ * frecuencia y duplicados los resuelve el backend. Con alcance global no hace nada: el sistema
+ * operativo entrega la tecla al backend y enviar desde aquí también causaría dos alertas.
+ */
 export function createShortcutHandler(options: {
   isFocused: () => boolean;
   isCapturing?: () => boolean;
-  getState: () => { settings: Settings | null; devices: DeviceView[] };
-  send: (deviceId: string) => Promise<AlertSendResult>;
+  getState: () => { settings: Settings | null };
+  send: () => Promise<AlertSendResult>;
   report: Report;
 }) {
   let pending = false;
   return async (event: KeyInput): Promise<void> => {
-    const { settings, devices } = options.getState();
-    if (!settings?.shortcutEnabled || !options.isFocused() || options.isCapturing?.() || event.isComposing || event.defaultPrevented) return;
+    const { settings } = options.getState();
+    if (!settings?.shortcutEnabled || settings.shortcutScope !== "local") return;
+    if (!options.isFocused() || options.isCapturing?.() || event.isComposing || event.defaultPrevented) return;
     const input = shortcutFromEvent(event);
     if (input.kind !== "ok" || input.value !== settings.shortcutKey) return;
     event.preventDefault();
     if (event.repeat || pending) return;
     pending = true;
-    const label = describeShortcut(settings.shortcutKey);
     try {
-      const recipient = shortcutRecipient(devices, settings.shortcutDeviceId, label);
-      if (recipient.connection !== "connected") throw new Error(`${recipient.name} no está conectado. No se guardó ninguna alerta.`);
-      const result = await options.send(recipient.deviceId);
+      const result = await options.send();
       options.report(result.status === "shown" ? "success" : result.status === "rejected" ? "warning" : "error", result.message);
     } catch (error) {
       options.report("error", error instanceof Error ? error.message : typeof error === "string" ? error : "No se pudo enviar DAME BOLA.");

@@ -132,18 +132,24 @@ pub fn get_settings(app: AppHandle, svc: Svc) -> AppResult<Settings> {
 
 #[tauri::command]
 pub fn save_settings(app: AppHandle, svc: Svc, settings: Settings) -> AppResult<Settings> {
-    let settings = settings.validated()?;
-    let autostart = app.autolaunch();
-    let currently = autostart.is_enabled().unwrap_or(false);
-    if settings.launch_at_login != currently {
-        let result = if settings.launch_at_login { autostart.enable() } else { autostart.disable() };
-        result.map_err(|e| {
-            AppError::System(format!("No se pudo cambiar el inicio con el sistema: {e}"))
-        })?;
-    }
-    let saved = svc.settings.save(settings)?;
-    svc.net.refresh_announcement(); // el nombre visible puede haber cambiado
-    Ok(saved)
+    crate::background::apply_settings(&app, &svc, settings)
+}
+
+/// Envío con el destinatario del atajo (mismas reglas que el atajo global y la bandeja).
+#[tauri::command]
+pub async fn send_shortcut_alert(app: AppHandle) -> AlertSendResult {
+    crate::background::send_from(&app, crate::send::Origin::Local).await
+}
+
+#[tauri::command]
+pub fn get_background_status(app: AppHandle, svc: Svc) -> crate::background::BackgroundStatus {
+    crate::background::status(&app, &svc)
+}
+
+/// Salida completa (no confundir con cerrar la ventana).
+#[tauri::command]
+pub fn quit_app(app: AppHandle) {
+    std::thread::spawn(move || crate::background::quit(&app));
 }
 
 // ----------------------------------------------------------------- alertas

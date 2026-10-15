@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { RotateCcw, Save } from "lucide-react";
+import { LogOut, RotateCcw, Save } from "lucide-react";
 import { Button, Card, PageHeader, Switch } from "../components/ui";
 import { useToasts } from "../components/Toasts";
 import { useAppState } from "../hooks/useAppState";
 import { useNetworkState } from "../hooks/useNetworkState";
 import { ShortcutSetting } from "../components/ShortcutSetting";
-import { describeShortcut } from "../lib/shortcut";
-import type { Settings } from "../types";
+import { describeShortcut, globalShortcutIssue } from "../lib/shortcut";
+import { api, errorMessage } from "../services/api";
+import type { BackgroundStatus, Settings } from "../types";
 
 const DEFAULT_DURATION = 15;
 const MIN_DURATION = 3;
@@ -30,6 +31,11 @@ export function SettingsPage() {
   const { notify } = useToasts();
   const [draft, setDraft] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
+
+  const [background, setBackground] = useState<BackgroundStatus | null>(null);
+  useEffect(() => {
+    api.getBackgroundStatus().then(setBackground).catch(() => undefined);
+  }, [settings]);
 
   const lastSaved = useRef<Settings | null>(null);
   useEffect(() => {
@@ -57,6 +63,8 @@ export function SettingsPage() {
   const missingTarget = draft.shortcutDeviceId !== null && !paired.some((d) => d.deviceId === draft.shortcutDeviceId);
 
   const shortcutLabel = describeShortcut(settings.shortcutKey);
+  const globalIssue = draft.shortcutScope === "global" ? globalShortcutIssue(settings.shortcutKey) : null;
+  const globalNotRegistered = settings.shortcutScope === "global" && settings.shortcutEnabled && background !== null && background.globalShortcut === null;
 
   async function saveShortcut(shortcutKey: string): Promise<boolean> {
     if (!settings) return false;
@@ -87,12 +95,25 @@ export function SettingsPage() {
       />
 
       <Card>
-        <Row title="Atajo de teclado" hint={`Envía DAME BOLA con esta ventana en primer plano (${shortcutLabel}). No funciona con la app minimizada ni cerrada.`}>
+        <Row title="Atajo de teclado" hint={draft.shortcutScope === "global" ? `Envía DAME BOLA con ${shortcutLabel} desde cualquier aplicación, incluso con esta ventana oculta. No funciona si salís completamente.` : `Envía DAME BOLA con esta ventana en primer plano (${shortcutLabel}).`}>
           <Switch checked={draft.shortcutEnabled} onChange={(v) => patch({ shortcutEnabled: v })} label="Activar atajo de teclado" />
         </Row>
 
         <Row title="Combinación" hint="Teclas F1–F24, o Ctrl/Cmd + letra o número. Se guarda al instante; por defecto F12.">
           <ShortcutSetting current={settings.shortcutKey} onSave={saveShortcut} />
+        </Row>
+
+        <Row title="Alcance del atajo" hint="Por defecto solo funciona dentro de DameBola. En modo global el sistema operativo registra únicamente esta combinación; DameBola no lee ninguna otra tecla.">
+          <div className="w-72 space-y-2">
+            <select aria-label="Alcance del atajo" value={draft.shortcutScope} onChange={(e) => patch({ shortcutScope: e.target.value as Settings["shortcutScope"] })} className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm">
+              <option value="local">Solo dentro de DameBola</option>
+              <option value="global">Global (incluso con la ventana oculta)</option>
+            </select>
+            {globalIssue && <p role={globalIssue.level === "error" ? "alert" : undefined} className={`text-xs ${globalIssue.level === "error" ? "text-red-400" : "text-amber-400"}`}>{globalIssue.text}</p>}
+            {draft.shortcutScope === "global" && !globalIssue && <p className="text-xs text-zinc-400">Si otro programa o el sistema ya usa la combinación, no se activa y se mantiene la configuración anterior.</p>}
+            {globalNotRegistered && <p role="alert" className="text-xs text-red-400">{background?.globalError ?? "El atajo global no está registrado."}</p>}
+            {settings.shortcutScope === "global" && settings.shortcutEnabled && background?.globalShortcut && <p className="text-xs text-emerald-400">Registrado en el sistema: {describeShortcut(background.globalShortcut)}</p>}
+          </div>
         </Row>
 
         <Row title={`Destinatario (${shortcutLabel})`} hint="Con un solo equipo emparejado se elige automáticamente. Si hay varios, seleccioná uno.">
@@ -135,8 +156,28 @@ export function SettingsPage() {
           <Switch checked={draft.animationsEnabled} onChange={(v) => patch({ animationsEnabled: v })} label="Animaciones" />
         </Row>
 
-        <Row title="Iniciar con el sistema" hint="Abre DameBola al iniciar sesión (macOS: Elementos de inicio · Windows: registro del usuario).">
+      </Card>
+
+      <h2 className="mb-3 mt-8 text-lg font-bold">Segundo plano</h2>
+      <Card>
+        <Row title="Mantener DameBola ejecutándose al cerrar la ventana" hint={draft.showTrayIcon ? "Cerrar la ventana solo la oculta: la red, las alertas y el atajo siguen activos. Se abre y se sale desde la bandeja. Desactivado, cerrar la ventana cierra DameBola." : "Requiere el icono de la bandeja."}>
+          <Switch checked={draft.keepRunningOnClose && draft.showTrayIcon} disabled={!draft.showTrayIcon} onChange={(v) => patch({ keepRunningOnClose: v })} label="Mantener DameBola ejecutándose al cerrar la ventana" />
+        </Row>
+
+        <Row title="Mostrar icono en la bandeja" hint="Windows: bandeja del sistema · macOS: barra de menús. Sin el icono, cerrar la ventana cierra DameBola.">
+          <Switch checked={draft.showTrayIcon} onChange={(v) => patch(v ? { showTrayIcon: true } : { showTrayIcon: false, keepRunningOnClose: false })} label="Mostrar icono en la bandeja" />
+        </Row>
+
+        <Row title="Iniciar DameBola con el sistema" hint="Abre DameBola al iniciar sesión, sin permisos de administrador (macOS: Elementos de inicio · Windows: registro del usuario). Solo si lo activás.">
           <Switch checked={draft.launchAtLogin} onChange={(v) => patch({ launchAtLogin: v })} label="Iniciar con el sistema" />
+        </Row>
+
+        <Row title="Iniciar minimizado" hint={draft.showTrayIcon ? "Al iniciar con el sistema no se muestra la ventana; DameBola queda en la bandeja." : "Requiere el icono de la bandeja."}>
+          <Switch checked={draft.startMinimized && draft.showTrayIcon} disabled={!draft.showTrayIcon} onChange={(v) => patch({ startMinimized: v })} label="Iniciar minimizado" />
+        </Row>
+
+        <Row title="Salir completamente" hint="Detiene las conexiones, el audio y el atajo global, y cierra el proceso.">
+          <Button icon={<LogOut className="size-4" />} onClick={() => void api.quitApp().catch((e) => notify("error", errorMessage(e)))}>Salir de DameBola</Button>
         </Row>
       </Card>
     </div>

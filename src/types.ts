@@ -39,6 +39,31 @@ export interface Settings {
   shortcutKey: string;
   /** null: use the only paired device; never choose among several. */
   shortcutDeviceId: string | null;
+  /** "local": solo con la ventana enfocada (por defecto). "global": registrado en el sistema operativo. */
+  shortcutScope: ShortcutScope;
+  /** Cerrar la ventana la oculta y deja DameBola en la bandeja. */
+  keepRunningOnClose: boolean;
+  /** Al iniciar con el sistema, no mostrar la ventana principal. */
+  startMinimized: boolean;
+  showTrayIcon: boolean;
+  /** Lo escribe solo el backend (aviso del primer cierre). */
+  backgroundNoticeShown: boolean;
+}
+
+export type ShortcutScope = "local" | "global";
+
+export interface BackgroundStatus {
+  /** Combinación global registrada ahora mismo. */
+  globalShortcut: string | null;
+  /** Motivo por el que no se pudo registrar (ocupada, reservada…). */
+  globalError: string | null;
+  trayActive: boolean;
+  os: NetOs;
+}
+
+/** Resultado de un envío iniciado desde la bandeja o el atajo global (sin ventana que lo muestre). */
+export interface SendResultEvent extends AlertSendResult {
+  origin: "tray" | "global";
 }
 
 export type PlaybackState = "stopped" | "playing" | "paused";

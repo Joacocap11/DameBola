@@ -109,7 +109,7 @@ pub struct AlertSendResult {
 }
 
 impl AlertSendResult {
-    fn fail(status: &'static str, accepted: bool, reason: Option<&str>, message: impl Into<String>) -> Self {
+    pub(crate) fn fail(status: &'static str, accepted: bool, reason: Option<&str>, message: impl Into<String>) -> Self {
         Self { status, accepted, reason: reason.map(String::from), message: message.into() }
     }
 }
